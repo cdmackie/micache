@@ -1,0 +1,297 @@
+Ä¿Ä·MICACHE - BETA TEST VERSIONÄ¿
+
+
+
+1   Ä‡OVERVIEWÄÄ
+
+
+Ä¿1.1 What is a cache?
+ÄÄ
+A disk cache is a program which remains in memory after it has been loaded and intercepts read and write requests to selected disks. After the cache has transferred the data from the disk to the required memory address then the data is also stored within the cache. If after a short period of time the same information is again requested from the disk, the cache program will check its own memory in case it holds a copy of the data, and if so merely transfers it from its own internal store, the cache, to the requested address. Thus saving a physical transfer from the disk which is much time time consuming than from memory.
+
+The cache area itself is limited to the amount of memory that the computer actually has, and this can therefore reduce the performance of the cache.
+
+
+Ä¿1.2 Why is this cache better than any other?
+
+ÄÄThe MI Systems cache has been tried and tested against many other popular and commercial caching systems and has proved to be far superior in terms of speed and efficiency. The program has been written to take into account many other possible enhancements of the target computer; DOS version, processor type, etc., and using this information to adjust itself to be that more effective in its performance. The memory management used within MI-CACHE is extremely powerful, in that it can use three different memory specifications: extended, expanded and normal conventional memory, but also has added functionality in order to reduce the amount of conventional memory that will be used by taking advantage of the working DOS version. For example, MS-DOS 5.0 has the capability of Upper Memory Blocks (UMBs) which are not within conventional memory, MI-CACHE will use them if they exist. All in we believe MI-CACHE to be one of the most proficient disk cache utilities available.
+
+
+
+Ä¿2   Ä‡USING THE CACHEÄÄ
+
+
+Ä¿2.1 Command Line - to install
+ÄÄ
+The command line is simple to understand and easy to use. The format is presented below:
+
+	MICACHE drive: [size] [options]
+
+	drive:    The disk drive to be cached, e.g. 'C:'
+	[size]    Optional size of the cache area in kilobytes, e.g. '256'
+	[options] are:
+		-X    Use extended memory only for cache area
+		-E    Use expanded memory only for cache area
+		-C    Use conventional memory only for cache area
+
+		-A    Allow redundant writes
+		-D    Disable cache on loading
+		-H    Display HIT indicator
+		-M    Minimise the use of conventional memory
+		-R    Read has priority over writes
+		-T:nn Read nn sectors ahead in track (Default is all)
+
+		-?    Display help screen
+
+		-W    Allow writes (DEBUG version only)
+
+(BETA) In this Beta Release the disk drive must be specifically given, although future releases will cache all drives unless explicitly ignored. The drive is given as its DOS equivalent, e.g. 'C:', and must be a physical unit as part of the computer and NOT a external drive which uses a device driver, nor may it may any sort of network or ASSIGNed drive.
+
+The size of the cache can optional be specified, normally it will be calculated automatically from the amount of free memory within the system. The value is in Kilobytes (KB) and must not be less than 64 and not greater than 8096. Due to the nature of the disk, the cache is built up of so many logical disk tracks in memory, and thus if the specified size of the cache does not allow an exact number of tracks then it will be reduced to the nearest value. On standard systems this would probably mean an adjustment of up to 9K.
+
+The options exist to allow greater control over the operation of the cache. Each option follows the remainder of the command line and is generally in the format '-' or '/' and the letter in either upper or lower case, e.g. '/m' or '-T:4'.
+
+Ä¿-X, -E, -CÄÄ
+
+The type of memory that will be used for the cache can de specified. This will override the automatic detection of memory allocation and use only the requested type. If no type is specified, then all the types will be examined to determine if they exist and the amount of free memory. The search is conducted in the order: extended, expanded and finally conventional. If a memory type is specified and either does not exist or does not contain a sufficient area to hold the cache, then the cache will fail its loading process and abort. Otherwise if a cache size has been specified then that amount will be used, else the cache will use half of the available memory (unless in conventional where just under half is used).
+
+Ä¿-AÄÄ
+
+This cache utility does NOT cache disk writes, only reads, so if the power goes down you can be sure that there was not data in the cache waiting to be written to disk. However by default the cache does check to see if a disk write is redundant, i.e. the data to be written is the same as what is already on the disk, and will just ignore the write request. This can be disabled by specifying this option so that all disk writes are performed regardless.
+
+Ä¿-DÄÄ
+
+Once the cache has been loaded it can be disabled straight away by specifying this option. Not caching of the disks will be performed until it has been enabled (see command line - while installed).
+
+Ä¿-HÄÄ
+
+The hit indicator will display a inverse 'H' in the top right corner of the screen whenever a disk access is requested which has been cached. The is a convenient way to examine the effectiveness of the cache. Note however, due to technical reasons, the cache will be slowed down by this option as it must pause slightly before displaying the indicator to ensure that it is actually shown.
+
+Ä¿-MÄÄ
+
+With this option enabled the cache program will try to minimise the amount of conventional memory that will be used. It does this by using special enhancements in MS-DOS, for instance the use of UMBs. (BETA) Note that this function not fully implemented.
+
+Ä¿-RÄÄ
+
+When disk write is performed, the data is physically written to the disk, but also stored within the cache in case it will be needed again. Normally on reading information which has just been written, only the cache image will be transferred. However, this might cause problems with some technical applications, and therefore there is an option to always read a sector physically from the disk which has been cached by a write request.
+
+Ä¿-?ÄÄ
+
+When this option is given in the command line, all others are ignored and the on-line help is displayed on the screen.
+
+Ä¿-W (DEBUG version only)ÄÄ
+
+In the DEBUG version, disk writes are never allowed, but instead return a disk-write-protected error. This can be overridden by using this option in the command line.
+
+
+Ä¿2.2 Command Line - whilst installedÄÄ
+
+There are a different set of options in the command line after the cache has been successfully installed. They deal with the on-line management of the cache and displaying statistical information, and are explained below:
+
+	MICACHE [options]
+
+	[options] are:
+		-D    Disable the cache
+		-E    Enable the cache
+		-F    Flush the cache
+		-M    Display cache measurements
+		-O    Display operating options
+		-U    Unload cache from memory
+
+		-?    Display help screen
+
+		-C    Show cache map (DEBUG version only)
+
+Ä¿-D
+
+ÄÄAt any time whilst the cache is operating normally it may be disabled. The cache will still remain in memory and can be re-enabled using the -E option.
+
+Ä¿-EÄÄ
+
+Used to re-enable the cache. If on starting the cache the -D option (disable) was used, then this option will enable the cache for the first time.
+
+Ä¿-FÄÄ
+
+Flushes all of the caches internal buffers as if the program had been restarted.
+
+Ä¿-MÄÄ
+
+Displays statistical cache information of the number of disk transfers that have been performed and how many of these were saved by the cache being in operation.
+
+Ä¿-OÄÄ
+
+Displays the options that were used on starting the cache.
+
+Ä¿-UÄÄ
+
+Unloads the cache and frees all used memory.
+
+Ä¿-?ÄÄ
+
+Displays the help screen for the installed cache.
+
+Ä¿-C (DEBUG version only)ÄÄ
+
+Gives a mapping of all the cache entries in the Least Recently Used list.
+
+
+
+Ä¿3   Ä‡CACHE MANAGEMENTÄÄ
+
+The cache is built up of two main areas:
+
+	1) Cache Track Entries
+	2) Least-Recently-Used List of Cache Track Descriptors
+
+Ä¿3.1 Cache Track EntriesÄÄ
+
+On start-up the allocated memory is logically divided into sections which are images of the physical tracks on the disk which is to be cached. Each of these tracks is assigned a cache track descriptor which will always hold housekeeping information on the contents on this cache track entry. As sectors are loaded to and from the cache entry so the descriptor will be updated to reflect the change. One cache track may only hold one particular physical track from the disk at any one time, but this track may be replaced for another. The size of each cache entry is determined by information requested from the operating system, the maximum number of bytes per sector and maximum number of sectors per track on the disk. Therefore it may well be feasible that a portion of each cache track may never be used in some circumstances where the cached disk is below these values.
+
+If the cache entries lie in conventional memory then on a read request for the disk the data is copied directly into the cache, and then into the destination memory location. However, with expanded or extended memory this is not possible due to the addressing modes of the BIOS, and therefore a temporary track is built up in conventional memory which can be used as a stepping stone into the cache. The reason that we do not write directly into the destination location is because more often than not we read more sectors than is requested, for obvious caching purposes, and therefore this is impractical.
+
+Ä¿
+3.2 LRU List of Cache Track DescriptorsÄÄ
+
+For each of the cache entries there is a unique descriptor. These are assigned at start-up and contain vital housekeeping information on the contents of the cache entry:
+
+ 	Contents of a cache descriptor:
+	  More Recently Used cache descriptor
+	  Less Recently Used cache descriptor
+	  First sector stored in cache entry
+	  Number sectors stored
+	  Track number
+	  Head number
+	  Drive identification number
+	  Segment of cache entry (or 512-byte-page number if extended/expanded)
+	  Locking flag
+
+All of the descriptors are contained in a Least-Recently-Used double-linked list so that the contents of the cache can be made as efficient as possible. Whenever a read is requested, the cache descriptors are scanned for the relevant physical track. If the track is contained within the cache then that descriptor will be promoted to the top of the list becoming the most recently used. If, on the other hand, the track is not within the cache then the cache descriptor in the least recently used position is cleared and given the values of the new physical track. In this way we try to maintain the data stored in the cache so that the chance of it being accessible for any read request is as high as possible.
+
+
+Ä¿3.3 Reading from the diskÄÄ
+
+On a read request from the application program, we perform a scan on the cache to see if we hold the requested information. If we do, then it can be read directly from the cache into the applications memory, otherwise it must be loaded from the disk and stored in both the destination memory and the cache.
+
+There are several techniques employed to ensure that data is read and maintained in the cache as effectively as possible:
+
+	1) Read all sectors in track
+	2) AI method of read-ahead
+
+By default, the cache starts up with the -T option set to the maximum value. This implies that any read performed on the disk will read all of the sectors that are contained in that track. The time taken to read the extra sectors is extremely small in comparison to that of performing several reads to obtain the same information, but not much more than that of reading just the requested data. Using this technique allows us to have as much data as possible in the cache at any time, and therefore will usually result in quicker data transfers.
+
+Alternatively, if we do not read the rest of the tracks, then we employ an intelligent scheme to find any likely consecutive reads. If for example, we read the first sector of a track and then read the next sector, and the next, so on, then we would use many more disk accesses than necessary. Therefore the cache will notice a read request of any consecutive, and if viable, with the read the remainder of the track regardless to avoid these unnecessary disk accesses.
+
+
+Ä¿3.4 Writing to the diskÄÄ
+
+Whenever we write to the disk, then the data is physically written out with no delayed caching. This is so that if the power was lost on the machine then the data on the disk would not be out of date and nothing would be lost. However, we still check the cache to see if the entry exists in case we are writing an exact copy of what is already stored on the disk. In this case we do not actually write to the disk but just carry on as if everything was performed normally. If the information stored in the cache differs from what is to be written, then we perform the write operation. The function can be disabled at start-up time by using the -A option, to allow redundant writes.
+
+
+
+Ä¿4   Ä‡MEMORY MANAGEMENTÄÄ
+
+
+The cache program is extremely versatile in its memory management in that it can use both extended and expanded memory as well as normal conventional memory. This allows the cache size to be greater than that of conventional memory, and to free as much conventional memory as possible for use by other applications. There is also an added facility to use the Upper Memory Blocks (UMB) if MS-DOS 5.0 is the operating system, which can again cut down conventional memory.
+
+
+Ä¿4.1 Cache DescriptorsÄÄ
+
+Normally the cache descriptors, which are of a variable size, get appended to the cache program in conventional memory and add to the size of the program in memory once it has been loaded. Fortunately, this is a fairly small overhead, about 112 bytes per 64K of cache. But also if we are using extended or expanded memory then a temporary track must also be put into conventional memory (3.1) which amounts to about 9K. If we are using DOS 5.0 and UMBs are available then both of these would be placed there to reduce the conventional memory used.
+
+
+Ä¿4.2 Cache EntriesÄÄ
+
+The actual cache area is a contiguous block of memory reserved explicitly for the use of the cache program. Once it has been allocated it cannot be released until the system is unloaded with the -U option. The size of the cache must be in the range of 64K to 8096K. The lower limit is imposed because anything below this will not improve the performance of disk transfers. The upper limit is imposed due to restrictions in the method used to calculate the memory sizes and so forth. This could however be written to cope with larger sizes, but is it really necessary?
+
+On starting MI-CACHE the type of memory to be used can be specified. If this is the case, then the cache will fail to load for the following reasons:
+
+	1) Memory type does not exist, or error in memory manager
+	2) Insufficient memory for 64k cache
+
+If there is more than 64K of the memory type (plus an extra 64K for DOS with conventional memory) then we allocate half of the available amount or 64K, whichever is greater. If a cache size has been specified as well as a memory type, then there must be at least that much memory.
+
+In the case where we do not specify a memory type, then all types of memory are examined in the given order: extended, expanded and conventional, to find one which satisfies are requirements, i.e. at least 64K or the given cache size.
+
+
+
+Ä¿5   Ä‡MISCELLANEOUSÄÄ
+
+
+Ä¿5.1 386 InstructionsÄÄ
+
+In an effort to improve the performance of the cache, one of the areas in which the time taken could be reduced was that of copying data from the cache to the applications memory and vice-verca. To do this we must detect the type of processor that the program is running on, and if it is a 80386 or greater we can use special 386 instructions to move a block of memory in double words as oppose to words on other processor types. This has been definitely been successful in speeding up the overall performance of the cache.
+
+
+Ä¿5.2 MS-DOS Version 5.0ÄÄ
+
+With the advent of MS-DOS 5.0, the UMBs came into existence. Unfortunately they are too small to accommodate a sufficiently sized cache but do serve a purpose in reducing the amount of conventional memory the program uses. There were some technical details in allocating the UMBs, as the documented routines using HIMEM.SYS do not appear to work, and therefore they are allocated directly from DOS using some (dubious?) undocumented methods. This is supposed to be used with the -M switch to minimise conventional memory, but it is better if it did this automatically and hence why -M is now not fully implemented.
+
+
+Ä¿5.3 Error MessagesÄÄ
+
+The error message which are displayed in MI-CACHE are all self-explanatory, are all all deal with the installation routines and parsing the parameters:
+
+	Invalid parameter
+	Must have DOS version 2.10 or greater
+	Insufficient memory to create cache
+	Unable to unload MI-CACHE
+	MI-CACHE is not loaded
+	MI-CACHE is already loaded'
+	Cache must be at least 64K - adjusting size'
+	Extended Memory Manager is not loaded'
+	Expanded Memory Manager is not loaded'
+	Require EMM Version 3.2 or greater'
+	Memory allocation error'
+	Error whilst allocating extended memory'
+	Error whilst allocating expanded memory'
+
+
+Ä¿5.4 Time TrialsÄÄ
+
+Performance test have been conducted on the cache system to see how it compares with other retail cache programs. Below we have the results using Norton's System Information which calculates the disk performance index relative to the IBM XT. All tests were performed on a 386 (20Mz), using a 256 K cache.
+
+				     Memory Type Used
+
+	System	Expanded	Extended	Conventional
+
+	DOS		10.7		10.7		10.7
+	Super-PCKwik	14.5		15.5		15.5
+	PC-Cache	14.8		Doesn't work	16.2
+	MI-CACHE	16.2		16.6		16.6
+
+
+Ä¿5.5 Memory TrialsÄÄ
+
+Another factor to be considered is the amount of conventional memory used when the cache is operation. There however certain methods a program can use to minimise this value. For instance, PC-Cache will adjust the cache size that is specified so that conventional+cache=cache size, and therefore there appears to be no overheads. Below are the amounts of conventional memory used by each programs when the cache (256K) is placed in the different memory types.
+
+				Memory Type Used
+
+			Expanded	Extended	Conventional
+	Super-PCKwik	17.5K		37.7K		256K
+	PC-Cache	5.6K		Doesn't work	256.3K
+	MI-CACHE	14.6K		14.6K		257.1K
+
+The differences are fairly minimal whilst using conventional memory, but if the cache is in extended or expanded then we want this amount reduced as much as possible. The above configuration did not allow the use of UMBs, if they did exists then the values for MI-CACHE would be reduced by another further 9K.
+
+Ä¿
+5.6 System RequirementsÄÄ
+
+The requirements for MI-CACHE to execute properly are minimal. Obviously, as the system specification improves so will the performance of the cache.
+
+	8086 or greater with at least 128K of free memory
+	MS-DOS/PC-DOS Version 2.10
+
+The system does not have to have a hard disk, as we can just cache the floppy drives. However, for the best results it is better to use a caching program on a hard disk.
+
+
+
+Ä¿6   Ä‡BETA TESTINGÄÄ
+
+The caching program has been quite thoroughly tested as it was written and there are very few bugs that are known, non of them fatal. Thus it would be advantageous to have the system tested on other machines, with different disks, different configurations, etc.
+
+If the cache program performs admirably and a way can be found to further reduce the amount of conventional memory that is allocated, then the program will be sent and released to ShareWare publishers and eventually hit, and make an impact, on the software market. It is undoubtedly one of the fastest caches around, so it only remains to see it is also one the most robust.
+
+
+
+Colin Mackie (shortdate)
+TOPLVL D	éÄ°Ä˛ÄÄÅæ6; L∞∞  L@LÄLLH	LàLLPˇ                                                                                                                                             ¨&7      ÅÄHP LaserJet3 Port      

@@ -1,0 +1,4715 @@
+; MI Systems  MI-CACHE  Disk Caching Utility Version 1.0
+; Copyright (C) 1992. All rights reserved.
+;
+;
+; TECHNICAL NOTES
+;
+;
+; Hard Disk BIOS
+;
+; It turns out that the reason the cache wont work on a hard disk is because the
+; HD BIOS is more intelligent than I first thought. You can ask the HD BIOS for any
+; number of sectors up to 80H, so an overrun will occur when you add the first sector
+; number to the number of sectors-1.
+; So now when we have a call to our INT13 with the number of sectors out of range, we must
+; deal with it properly. For efficiency's sake we must still call the old handler with
+; the same number of sectors, but they must be stored in the cache in n-sector tracks.
+; ie. if we read fs=1 and ns=34 (on 17 spt)
+;
+;
+; Extended 1
+;
+; When we want to use Extended/Expanded memory then there is a buffering problem in how
+; we transfer the data from the disk via the cache to memory. If the data is not in the
+; cache then we must read it into the cache. At present we read the disk into the cache,
+; and then read from the cache into memory. However, if the cache has been set up in
+; extended memory then this cannot be done. Thus on reading we must read from the disk
+; straight into memory (if not in cache) and then copy it back into the cache from memory.
+; This would seem easy enough, except when we get the case where we have part of the track
+; in the cache already and we need to read some more of that track from the disk into
+; the cache to make the CT entry valid. In this case we might not be reading data from the
+; disk which will be going into memory:
+;  Eg.   1  2  3  4  5  6  7  8  9
+;        X  X  X  X                  - in cache
+;                          R  R  R   - required
+;  Here we would read sectors 5 through to 9, but only 7-9 are to be put in memory.
+; The first solution is to set up a temporary track in conventional memory which can be
+; used as a buffer in this circumstance, but we would still read from disk->memory->cache
+; mainly. Alternatively, if this situation occurs then we read only those sectors we
+; require (7-9) and mark the CT as only having those sectors, then we can read straight
+; into memory (using the memory as a buffer).
+;  The temp. track would be the maximum possible and would normally be 512*18 = 9K, but
+; could be 1024*18 = 18K or 512*33 = 15K for different disks.
+;  The rereading would mean we would lose previously read information and decrease caching
+; performance, but requires no extra memory. In fact it would be better to completely
+; invalidate the track so that we have to read from disk anyway. Thus: if we have the track
+; in the cache, but it does not have all the required sectors and those sectors we must
+; read extra are all requested then read sectors via memory as buffer, else invalidate CT.
+;
+;
+; Extended 2
+;
+; When we allocate extended memory we cannot do as I first thought and allocate one CT
+; seperately from the XMM. This is because there are a limited number of handles available
+; and thus we should be nice and use up one handle. There for we must check that the
+; largest available block will meet our requirements and allocate that. CTsegD will then
+; have a half-kilobyte offset into the extended block (0-32GB).
+;
+;
+; Expanded 1
+;
+; We basically have the same problem as extended in that CTsegD must contain a half-kb
+; offset into the mapping via the handle. We have to first load the CT that we require
+; into the physical page, calculate the correct offset in the emmsegD and then perform
+; our memory tasks.
+;
+;
+; Stack
+;
+; Due to expanded memory it is recommended that we have our own substantial stack, the
+; actual size of which is yet unknown - 512 for now.
+;
+;
+; Saving and Restoring State
+;
+; It has become necessary as we use the different memory type to save and restore the state
+; of the system as we enter the INT13 isr. Apart from switching to an internal stack, we
+; also save the state of the A20 line for extended, and the mapping context for expanded.
+; However, if the program fails for some reason, eg. critical disk error, then we must be
+; able to restore the state and stabilise the cache. To to this its probably best to catch
+; the INT24 interrupt and on an error we can restore properly, also to null the CTRL-C
+; vector so that it will never bother us.
+;
+;
+; 386 Enhancements
+;
+; If the machine is a 386+ then we are allowed to use another string movement function
+; ie. MOVS DIR, which will increase the speed of block transfers within the caching.
+; Therefore at startup of the cache we check to see whether the processor if a 386+ and
+; set an internal flag. From then on, any block movements within the caching routines
+; will use the faster DWORD versions.
+; NOTE: to assemble the code we require MIL version 1.2+, and MASM version 5.1+
+;
+;
+; UMB 1
+;
+; The memory allocation of the UBMs doesn't seem to work with the documented XMS
+; calls, as it always returns 'UMBs unavailable' if the UMBs are there, and 'funtion
+; not implemented if there aren't. Therefore we have to use the standard DOS calls
+; to alter the memory allocation and link strategies to be able to allocate a UMB.
+; At present there is no other checking of the UBMs presence except in error conditions
+; returned by these functions. If we are certain that they do not exist below DOS 5.0
+; then we should add this check. UMBs will only exist on the 286+, but we shouldn't really
+; concern ourselves with this.
+;
+;
+; UMB 2
+;
+; If UMBs do exists then we might as well take full use of them. The ways in which we
+; can do this are as follows:
+;  1) We can put the CT descriptors in a UMB to save on conventional memory.
+;  2) If we are not using CONVENTIONAL we can place the temporary track in UMB memory.
+; The best way to do this is probably to detect whether UMBs exist, and if they do then
+; we can try and use them to their full extent.
+;
+;
+; Memory for CT Descriptors (and temporary track)
+;
+; I think it would be a good idea to allocate the memory via DOS for the temporary track
+; and the CT descriptors. This is so that our cache program will always be less than is
+; required to load the memory image on executing. With the code to access the track and
+; descriptors being written for 'not knowing where they are' we could then quite easily
+; implement UMB support (see above) for these extra items.
+;
+;
+; IBM Interrupt Chaining Protocol
+;
+; There exists a protocol for interrupt chaining so that such handlers can quite easily
+; be removed from the chain. At the start of the interrupt handler there exists an 18
+; byte header containing information about the handler.
+;   00 JMP SHORT to start of handler
+;   02 Previous Interrupt Handler
+;   06 Signature word (424BH)
+;   08 Flags - normally 0, 80H if first handler (h/w)
+;   09 JMP SHORT Reset - handler h/w reset, else point to RETF
+;   0B Reserved (0) - 7 bytes
+;
+;
+; Parameters:
+;
+;  If Not Resident:
+; Done   -?     Help
+; Done   -X     Use Extended memory (abort if doesn't exist or less than 64K, else use all)
+; Done   -E     Use Expanded memory
+; Done   -C     Use conventional memory
+; Done           If no memory type defined, try X,E and C
+;
+; Done   -A     Allow redundant writes
+; Done   -D     Start up cache disabled
+; Done   -H     Show hit indicator
+;        -M     Minimise conventional memory
+; Done   -R     Give read priority over writes (if sector in cache was writen to disk
+;               then if reading, read from the disk and ignore the cache)
+; Done   -T:nn  Read ahead by nn sectors in track (if nn is spt then 'read rest of track')
+;
+;  If Resident:
+; Done   -?     Help
+; Done   -D     Disable cache
+; Done   -E     Enable cache
+; Done   -F     Flush cache
+;        -M     Display measurements
+;        -O     Show options
+; Done   -U     Unload
+;
+;
+DVERSION EQU 0
+#IF DVERSION
+DEBUG   EQU 1
+NOWRITE EQU 1
+#ELSE
+DEBUG EQU 0
+NOWRITE EQU 0
+#ENDIF
+;
+; Memory types
+MEMUNDEFINED EQU 0
+CONVENTIONAL EQU 1
+EXTENDED     EQU 2
+EXPANDED     EQU 3
+
+; Header for each Cache Track
+STRUCT CACHETRACK {
+   WORD CTmruD	; next CT in list
+   WORD CTlruD	; previous CT
+   WORD CTsegD	; seg address of CTDATA
+   ;
+   BYTE CTdrive	; drive (0,1..80..) for CT
+   WORD CTtrackD	; 10bit track number
+   BYTE CThead	; head number
+   BYTE CTfsector	; first sector number in CT
+   BYTE CTsectors	; number of sectors in CT
+   BYTE CTlocked	; if 1 locks CT in cache
+   BYTE CTlastop	; 0=undefined,2=read,3=write
+   LIST CTblank (2)
+}
+
+; There will be an array of 4 of these structures for the drives
+; A(00), B(01), C(80), D(81). If we are to exclude the drive from the
+; cache then we mark the type as 0. If the drive is invalid (not found) we mark
+; the type as 0. If it is a hard disk, we load the boot sector and read the
+; number of spt and store it in DRVspt. For floppy disks with change detection
+; we will re-assign the spt value when we read in the boot sector for the first
+; time. If the drive has no change detection, then we assume 8 and for sectors
+; over this, just read/write them stright to disk
+;
+STRUCT DRIVEDEF {
+   BYTE DRVid	; drive number
+   BYTE DRVtype	; type of drive: (0=not used, 1=no change,
+	; 2=change, 3=hard disk)
+   BYTE DRVspt	; SpT for this drive (or disk if floppy)
+   BYTE DRVheads
+   WORD DRVbpsD	; Bps for drive
+}
+
+STRUCT XMDEF {
+   LIST XMlen (4)
+   WORD XMhsourceD
+   LIST XMsource (4)
+   WORD XMhdestD
+   LIST XMdest (4)
+}
+
+;------------------------
+DECLARE (DATA)
+DECLARE (CODE)
+;------------------------
+main ()
+{
+JMP begin
+;------------------------
+
+; stack
+LIST mystack (512)
+
+; Process information
+WORD pspD	; program segment prefix
+WORD dosversionD	; MSDOS version number
+WORD datasegD	; segment of our DS
+BYTE is386	; set if 386 processor
+
+; Memory management
+BYTE memorytype	; Extended, Expanded, conventional
+WORD requestedKD	; cache size in K
+WORD oldssD
+WORD oldspD
+; extended
+BYTE a20state	; saved state of A20 line
+LIST xms (4)	; XMS entry point
+WORD xmmhandleD	; handle for XMM block
+LIST xmsblock (XMDEF)
+; expanded
+WORD emmsegD	; page segment for EMM
+WORD emmhandleD	; handle to pages
+; ubms
+BYTE umbs	; umb? 0=none,ff=yes, but we dont use them
+	;      1=for CT, 2=for temptrack
+
+; Disk management
+BYTE errorcode	; disk read/write error
+BYTE dosdrive	; drive number via DOS
+BYTE drive	; drive number for INT13
+WORD disk_bpsD	; bps for current disk
+BYTE disk_spt	; spt for current disk
+WORD max_bpsD	; max bps for any disk
+WORD max_sptD	; max spt for any disk
+BYTE disk_heads	; number disk heads for current disk
+BYTE int13_operation	; current INT13 operation
+BYTE int13_drive	; current INT13 paramters
+BYTE int13_head
+BYTE int13_sectors
+BYTE int13_fsector
+WORD int13_trackD
+LIST int13_buffer (4)
+BYTE newfs
+BYTE newns
+LIST drivetable (DRIVEDEF*4)	; drive table
+
+; Cache management
+WORD tracksegD	; segment addres of temp track
+WORD cachesegD	; segment address of cache
+WORD number_ctsD	; number of CT entries
+WORD ct_lengthD	; length of one CT track table
+WORD ct_lengthinparasD	; length of CT track table in paras
+WORD ct_lruD	; offset of LRU CT
+WORD ct_mruD	; offset of MRU CT
+BYTE aicount	; flag for AI read ahead
+WORD aitrackD
+BYTE aihead
+BYTE aidrive
+BYTE moretodo
+BYTE cacheoff
+BYTE floppy0ok
+BYTE floppy1ok
+
+; measurements
+LIST logicals (4)	; number logical transfers
+LIST physicals (4)	; number physical transfers
+WORD convusedD	; conventional memory used
+
+; options
+BYTE allowredundant	; ignore redundant writes
+BYTE hitindicator	; show hit indicator
+BYTE minimise	; minimise conventional memory
+BYTE readpriority	; give read priority
+BYTE restoftrack	; flag for 'read rest of track'
+BYTE readahead	; readahead count
+#IF DVERSION
+BYTE allowwrite
+#ENDIF
+;
+BYTE uninstall	; uninstall flag
+BYTE displaycache	; displayflag
+BYTE showparas	; show options used
+BYTE showmeasures	; show performance
+BYTE disable	; disable cache
+BYTE rflush	; ask to flush the cache
+
+; misc
+WORD axtempD	; temp store for AX
+WORD retaddrD	; temp return address
+BYTE installed	; if we are or not
+WORD displayparaD	; video
+WORD oldhitD
+
+; debug
+#IF DEBUG ;===
+MESSAGE otherop = 'Other operation '
+MESSAGE readop = 'Read...'
+MESSAGE writeop = 'Write...'
+MESSAGE incache = 'Cached...'
+MESSAGE readnocache = 'No cache...'
+MESSAGE flshcache = 'Flush...'
+MESSAGE cacheok = 'Cache Ok'
+MESSAGE cacheused = 'Cache used'
+MESSAGE cachenotused = 'Cache not used'
+MESSAGE diskerror = 'Disk error'
+MESSAGE aiguess = 'AI used...'
+MESSAGE wrongdrive = 'Wrong drive...'
+MESSAGE readextra = 'EXTRA...'
+MESSAGE out13 = 'Exit 13'
+MESSAGE pre13 = 'Pre 13'
+MESSAGE floppy = 'Floppy boot sector..'
+BYTE keepfailing
+
+LIST gnum (6)
+MESSAGE spaces = '   '
+
+LIST testsector (2048)
+#ENDIF ;======
+;------------------------
+LABEL begin
+
+AX = CS
+DS = AX
+
+CLI
+;AX = &initstack
+MOV AX,OFFSET initstack
+AX += 15
+CX = 16
+XOR DX,DX
+DIV CX
+CX = CS
+AX += CX
+SS = AX
+AX = 250
+SP = AX
+STI
+
+init()	; get psp,memory,commandtail,etc
+IF (NC)
+   ; failed to initialise
+   AX = 4C01H
+   INT 21H
+ENDIF
+
+AX = 4C00H
+INT 21H
+}
+;------------------------
+myINT13 ()
+FAR
+{
+; We will use the IBM Interrupt Chaining Protocol
+; which defines a header in the format:
+;   00 JMP SHORT overheader
+;   02 old interupt vector
+;   06 signature (424BH)
+;   08 flags (00 - 80H for first handler)
+;   09 JMP SHORT reset - for h/w - just point to RETF
+;   0B Reserved (0) - 7 bytes
+;   22
+
+JMP SHORT int13begin
+LIST normINT13 (4)
+DW 424BH
+DB 0
+JMP SHORT int13ret
+DB 7 DUP (0)
+LABEL int13ret
+RETF
+
+LABEL int13begin
+
+; Our Disk BIOS routine
+;
+; AH = 2 (read) AH = 3 (write)
+; AL = number sectors
+; CL = sector number (plus 2 bits of track number)
+; CH = track number
+; DL = drive number
+; DH = head number
+;
+CLI
+PUSH DS
+PUSH AX
+AX = datasegD
+DS = AX
+POP AX
+DO
+   #IF DVERSION
+   IF (allowwrite = 0)
+   #IF DEBUG
+   #IF NOWRITE
+   IF (AH = 3 || AH = 0BH)
+      AH = 3
+      POP DS
+      STC
+      STI
+      RET 2
+   ENDIF
+   #ENDIF
+   #ENDIF
+   ENDIF
+   #ENDIF
+   ;
+   DO
+      EXITL (AH <> 0FFH)
+      EXITL (CL <> 'M' || CH <> 'I')
+      IF (AL = 0)
+         ; check installation?
+         POP DS
+         CL = 'O'
+         CH = 'k'
+         AH = cacheoff
+         CLC
+         STI
+         RET 2
+      ENDIF
+      IF (AL = 1)
+         ; uninstalling?
+         uninstall_tsr()
+         AX = 0
+         CMC
+         IF (NC)
+            AL = 'O'
+            AH = 'k'
+         ENDIF
+         POP DS
+         STI
+         RET 2
+      ENDIF
+      #IF DEBUG ;===
+      IF (AL = 2)
+         ; displaying?
+         dodisplaycache()
+         CLC
+         POP DS
+         STI
+         RET 2
+      ENDIF
+      #ENDIF ;======
+      IF (AL = 3)
+         ; disabling or enabling, first must flush cache
+         IF (DL = 0)
+            cacheoff = 1
+         ELSE
+            cacheoff = 0
+         ENDIF
+         flush_cache(0FFH)
+         CLC
+         POP DS
+         STI
+         RET 2
+      ENDIF
+      IF (AL = 4)
+         ; request to flush cache
+         flush_cache(0FFH)
+         CLC
+         POP DS
+         STI
+         RET 2
+      ENDIF
+      IF (AL = 5)
+         ; request measurement data
+         AX = CS
+         ES = AX
+         BX = &logicals
+         DX = requestedKD
+         AL = memorytype
+         CLC
+         POP DS
+         STI
+         RET 2
+      ENDIF
+      IF (AL = 6)
+         ; request parameter data
+         AX = CS
+         ES = AX
+         BX = &allowredundant
+         AL = memorytype
+         CLC
+         POP DS
+         STI
+         RET 2
+      ENDIF
+   END
+   ; see if we support the drive
+   IF (cacheoff = 0)
+      PUSH AX
+      testdrive(DL)
+      POP AX
+      EXIT (C) ; drive ok
+   ENDIF
+   ; call the old BIOS
+   POP DS
+   #IF DEBUG
+   PUSHF
+   PUSH AX
+   PUSH BX
+   PUSH CX
+   PUSH DX
+   PUSH DI
+   PUSH SI
+   PUSH DS
+   PUSH ES
+   PUSH AX
+   AX = CS
+   DS = AX
+   POP AX
+   debugregs()
+   POP ES
+   POP DS
+   POP SI
+   POP DI
+   POP DX
+   POP CX
+   POP BX
+   POP AX
+   POPF
+   #ENDIF
+   CLI
+   PUSHF
+   CALL DWORD PTR normINT13
+   STI
+   #IF DEBUG
+   PUSHF
+   PUSH AX
+   PUSH BX
+   PUSH DS
+   PUSH ES
+   AX = CS
+   DS = AX
+   debugline(&out13,1)
+   POP ES
+   POP DS
+   POP BX
+   POP AX
+   POPF
+   #ENDIF
+   RET 2
+END
+
+; we do support the drive
+errorcode = 0
+DO
+   EXITL (AH <> 2 && AH <> 3)
+   ;
+   ; swap to our own internal stack
+   CLI
+   axtempD = AX
+   AX = SP
+   oldspD = AX
+   AX = SS
+   oldssD = AX
+   AX = &mystack
+   AX += 508
+   SP = AX
+   AX = CS
+   SS = AX
+   AX = axtempD
+   ;
+   ; read/write operation
+   int13_operation = AH
+   int13_sectors = AL
+   pushall()
+   ;
+   int13_drive = DL
+   int13_head = DH
+   int13_buffer.0.D = BX
+   int13_buffer.2.D = ES
+   AL = CL
+   AND CL,00111111B
+   int13_fsector = CL
+   AH = 0
+   SHL AX,1
+   SHL AX,1
+   AL = CH
+   int13_trackD = AX
+   ;
+   #IF DEBUG
+   PUSH AX
+   PUSH DX
+   displayinfo()
+   POP DX
+   POP AX
+   #ENDIF
+   ;
+   ; check if we are out of bounds
+   moretodo = 0
+   CL = int13_fsector
+   CH = int13_sectors
+   AL = CL
+   AL += CH
+   AL--
+   AH = 0
+   BL = disk_spt
+   DIV BL
+   ; if AL = 0            - one track upto sector AL
+   ; If AL = 1 && AH = 0  - read to end of this track (ie. upto spt)
+   ; if AL = 1 && AH = <> 0 - read rest of track and AL sectors in next track
+   DO
+      EXIT (AL = 0)
+      EXIT (AL = 1 && AH = 0)
+      ; now AL >= 1
+      IF (AH = 0)
+         AL--
+      ENDIF
+      moretodo = AL ; tracks after this one
+      CL = int13_fsector
+      AL = disk_spt - CL
+      AL++
+      CH = AL
+   END
+   newfs = CL
+   newns = CH
+   int13_sectors -= CH
+   ;
+   savestate()
+   ;
+   logicals.0.D += 1
+   IF (C)
+      logicals.2.D += 1
+   ENDIF
+   ;
+   DO
+      IFL (int13_operation = 2)
+         #IF DEBUG ;===
+         PUSH AX
+         debugline(&readop,0)
+         POP AX
+         #ENDIF ;======
+         scan_cache_for_sector()
+         ; returns C (in cache) and AX (CT entry), DX (offset of first sector)
+         ; else NC (not in cache)
+         IF (NC) ; not in cache
+            #IF DEBUG ;===
+            PUSH AX
+            debugline(&readnocache,0)
+            POP AX
+            #ENDIF ;======
+            read_into_cache() ; returns DX with offset of sector, AX with CT
+            EXITL (errorcode <> 0) ; disk error
+            IF (AX = 0FFFFH) ; all CTs are locked, read from disk
+               JMP exit13normal
+            ENDIF
+         ENDIF
+         ; sector is in cache: AX (CT), DX (sector offset in cache)
+         #IF DEBUG ;===
+         PUSH AX
+         debugline(&incache,0)
+         POP AX
+         #ENDIF ;======
+         IF (hitindicator = 1)
+            sethit()
+         ENDIF
+         read_from_cache(AX,DX)
+         EXITL (errorcode <> 0)
+         ;
+         ; see if there are more
+         check_for_more() ; returns C if more, and has updated variables
+         CONTINUE (C)
+         ; no more
+         #IF DEBUG ;===
+         PUSH AX
+         debugline(&cacheok,1)
+         POP AX
+         #ENDIF ;======
+         JMP exit13normal
+      ENDIF
+      ;
+      IFL (int13_operation = 3)
+         #IF DEBUG ;===
+         PUSH AX
+         debugline(&writeop,0)
+         POP AX
+         #ENDIF ;======
+         scan_cache_for_sector()
+         ; returns C (in cache) and AX (CT entry), DX (offset of first sector)
+         ; else NC (not in cache)
+         IF (C) ; in cache
+            #IF DEBUG ;===
+            PUSH AX
+            debugline(&incache,0)
+            POP AX
+            #ENDIF ;======
+            PUSH AX ; save CT
+            compare_cache(AX) ; compares memory with cache
+            POP AX
+            IF (C)
+               ; compare ok
+               ;
+               ; check for more
+               IF (hitindicator = 1)
+                  sethit()
+               ENDIF
+               check_for_more()
+               CONTINUEL (C)
+               ; set for done
+               ; AL = sectors transferred
+               ; AH = 0
+               ; NC
+               #IF DEBUG ;===
+               PUSH AX
+               debugline(&cacheused,1)
+               POP AX
+               #ENDIF ;======
+               JMP exit13normal
+            ENDIF
+            ; else memory is different, so reload cache track
+            ; we want to reuse the CT in AX
+         ELSE
+            DI = ct_lruD ; use LRU CT
+            AX = cachesegD
+            ES = AX
+            ; find next unlocked CT
+            REPEAT
+               EXIT (ES.DI.CTlocked = 0)
+               DI = ES.DI.CTmruD.D
+               EXIT (DI = 0FFFFH)
+            ENDREP
+            AX = DI
+         ENDIF
+         ; sector is not in cache
+         ; use CT in AX (CT)
+         PUSH AX
+         write_to_disk () ; write out INT13 call to disk
+         POP AX
+         EXIT (errorcode <> 0) ; disk error
+         IF (AX <> 0FFFFH)
+            ; all CTs are not locked
+            write_to_cache(AX) ; copy memory into the cache
+         ENDIF
+         ;
+         ; more?
+         check_for_more()
+         CONTINUEL (C)
+         ;
+         ; set for done
+         ; AL = sectors transferred
+         ; AH = 0
+         ; NC
+         #IF DEBUG ;===
+         PUSH AX
+         debugline(&cachenotused,1)
+         POP AX
+         #ENDIF ;======
+         JMP exit13normal
+      ENDIF
+   END
+   ; error in disk IO
+   #IF DEBUG
+   PUSH AX
+   debugline(&diskerror,1)
+   POP AX
+   #ENDIF
+   IF (hitindicator = 1)
+      clearhit()
+   ENDIF
+   restorestate()
+   popall()
+   ; switch back to our old stack
+   CLI
+   axtempD = AX
+   AX = oldspD
+   SP = AX
+   AX = oldssD
+   SS = AX
+   AX = axtempD
+   STI
+   ;
+   POP DS
+   AH = errorcode
+   AL = 0
+   STC
+   STI
+   RET 2
+END
+DO
+   EXIT (AH <> 16H)
+   ; intercept the change disk status call
+   ; first call the old handler
+   POP DS
+   CLI
+   PUSHF
+   CALL DWORD PTR normINT13
+   ; examine the change flag
+   PUSHF
+   IF (AH = 6) ; disk has changed
+       PUSH DS
+       PUSH AX
+       AX = datasegD
+       DS = AX
+       POP AX
+       pushall()
+       ;
+       #IF DEBUG
+       PUSH AX
+       debugline(&flshcache,0)
+       POP AX
+       #ENDIF
+       flush_cache(DL)
+       ;
+       popall()
+       POP DS
+   ENDIF
+   POPF
+   STI
+   RET 2
+END
+; other operation which we are not concerned with
+#IF DEBUG ;===
+pushall()
+BX = &gnum
+BX.0 = 4
+AL = AH
+AH = 0
+numasc(BX,AX)
+debugline(&otherop,0)
+debugline(&gnum,1)
+popall()
+#ENDIF ;======
+POP DS
+CLI
+PUSHF
+CALL DWORD PTR normINT13
+STI
+RET 2
+
+LABEL exit13normal
+;
+IF (hitindicator = 1)
+   clearhit()
+ENDIF
+restorestate()
+popall()
+; switch back to our old stack
+CLI
+axtempD = AX
+AX = oldspD
+SP = AX
+AX = oldssD
+SS = AX
+AX = axtempD
+STI
+;
+POP DS
+AH = 0
+CLC
+STI
+RET 2
+
+}
+;------------------------
+#IF DEBUG ;===
+debugline (dlineD,dnl)
+WORD
+BYTE
+{
+SAVE BX,CX
+BX = dlineD
+CL = BX.0
+CH = 0
+BX++
+DO
+   EXIT (CL = 0)
+   AL = BX.0
+   BX++
+   EXIT (AL = 0)
+   debugchar(AL)
+   LOOP
+END
+IF (dnl = 1)
+   debugchar(10)
+   debugchar(13)
+ENDIF
+}
+;------------------------
+debugchar (dchar)
+BYTE
+{
+SAVE BX,DX,ES
+AH = 0EH
+AL = dchar
+INT 10H
+}
+;------------------------
+debugregs()
+{
+PUSH BX
+PUSH AX
+BX = &gnum
+BX.0 = 4
+POP AX
+numasc(BX,AX)
+debugline(&gnum,0)
+debugline(&spaces,0)
+;
+BX = &gnum
+BX.0 = 4
+POP AX
+numasc(BX,AX)
+debugline(&gnum,0)
+debugline(&spaces,0)
+;
+BX = &gnum
+BX.0 = 4
+numasc(BX,CX)
+debugline(&gnum,0)
+debugline(&spaces,0)
+;
+BX = &gnum
+BX.0 = 4
+numasc(BX,DX)
+debugline(&gnum,0)
+debugline(&spaces,0)
+;
+BX = &gnum
+BX.0 = 4
+numasc(BX,DI)
+debugline(&gnum,0)
+debugline(&spaces,0)
+;
+BX = &gnum
+BX.0 = 4
+numasc(BX,SI)
+debugline(&gnum,0)
+debugline(&spaces,0)
+;
+BX = &gnum
+BX.0 = 4
+numasc(BX,ES)
+debugline(&gnum,0)
+debugline(&spaces,0)
+;
+}
+;------------------------
+dodisplaycache ()
+{
+JMP dodidi
+MESSAGE tctmru = 'MRU = '
+MESSAGE tctlru = 'LRU = '
+MESSAGE title0 = 'CT     LRU    MRU    SEGM   '
+MESSAGE title1 = 'FSEC   SECS   DRVE   HEAD   TRCK   LOCK'
+LABEL dodidi
+
+BX = &gnum
+BX.0 = 4
+numasc(BX,ct_mruD)
+debugline(&tctmru,0)
+debugline(&gnum,1)
+;
+BX = &gnum
+BX.0 = 4
+numasc(BX,ct_lruD)
+debugline(&tctlru,0)
+debugline(&gnum,1)
+debugline(&title0,0)
+debugline(&title1,1)
+;
+DI = ct_mruD
+REPEAT
+   BX = &gnum
+   BX.0 = 4
+   PUSH DI
+   numasc(BX,DI)
+   debugline(&gnum,0)
+   debugline(&spaces,0)
+   POP DI
+   BX = &gnum
+   BX.0 = 4
+   PUSH DI
+   AX = cachesegD
+   ES = AX
+   DI = ES.DI.CTlruD.D
+   numasc(BX,DI)
+   debugline(&gnum,0)
+   debugline(&spaces,0)
+   POP DI
+   BX = &gnum
+   BX.0 = 4
+   PUSH DI
+   AX = cachesegD
+   ES = AX
+   DI = ES.DI.CTmruD.D
+   numasc(BX,DI)
+   debugline(&gnum,0)
+   debugline(&spaces,0)
+   POP DI
+   BX = &gnum
+   BX.0 = 4
+   PUSH DI
+   AX = cachesegD
+   ES = AX
+   DI = ES.DI.CTsegD.D
+   numasc(BX,DI)
+   debugline(&gnum,0)
+   debugline(&spaces,0)
+   POP DI
+   BX = &gnum
+   BX.0 = 4
+   PUSH DI
+   AX = cachesegD
+   ES = AX
+   AH = 0
+   AL = ES.DI.CTfsector
+   numasc(BX,AX)
+   debugline(&gnum,0)
+   debugline(&spaces,0)
+   POP DI
+   BX = &gnum
+   BX.0 = 4
+   PUSH DI
+   AX = cachesegD
+   ES = AX
+   AL = ES.DI.CTsectors
+   AH = 0
+   numasc(BX,AX)
+   debugline(&gnum,0)
+   debugline(&spaces,0)
+   POP DI
+   BX = &gnum
+   BX.0 = 4
+   PUSH DI
+   AX = cachesegD
+   ES = AX
+   AL = ES.DI.CTdrive
+   AH = 0
+   numasc(BX,AX)
+   debugline(&gnum,0)
+   debugline(&spaces,0)
+   POP DI
+   BX = &gnum
+   BX.0 = 4
+   PUSH DI
+   AX = cachesegD
+   ES = AX
+   AL = ES.DI.CThead
+   AH = 0
+   numasc(BX,AX)
+   debugline(&gnum,0)
+   debugline(&spaces,0)
+   POP DI
+   BX = &gnum
+   BX.0 = 4
+   PUSH DI
+   AX = cachesegD
+   ES = AX
+   AX = ES.DI.CTtrackD.D
+   numasc(BX,AX)
+   debugline(&gnum,0)
+   debugline(&spaces,0)
+   POP DI
+   BX = &gnum
+   BX.0 = 4
+   PUSH DI
+   AX = cachesegD
+   ES = AX
+   AL = ES.DI.CTlocked
+   AH = 0
+   numasc(BX,AX)
+   debugline(&gnum,1)
+   POP DI
+   AX = cachesegD
+   ES = AX
+   DI = ES.DI.CTlruD.D
+   EXIT (DI = 0FFFFH)
+ENDREPL
+
+}
+;------------------------
+displayinfo ()
+{
+SAVE AX,BX,CX,DX,DI,SI,ES
+BX = &gnum
+BX.0 = 4
+AL = int13_fsector
+AH = 0
+numasc(BX,AX)
+debugline(&spaces,0)
+debugline(&gnum,0)
+;
+BX = &gnum
+BX.0 = 4
+AL = int13_sectors
+AH = 0
+numasc(BX,AX)
+debugline(&spaces,0)
+debugline(&gnum,0)
+;
+BX = &gnum
+BX.0 = 4
+AL = int13_drive
+AH = 0
+numasc(BX,AX)
+debugline(&spaces,0)
+debugline(&gnum,0)
+;
+BX = &gnum
+BX.0 = 4
+AL = int13_head
+AH = 0
+numasc(BX,AX)
+debugline(&spaces,0)
+debugline(&gnum,0)
+;
+BX = &gnum
+BX.0 = 4
+AX = int13_trackD
+numasc(BX,AX)
+debugline(&spaces,0)
+debugline(&gnum,1)
+
+}
+;------------------------
+numasc (nuascD,numbeD)
+WORD
+WORD
+{
+PUSH BX
+PUSH CX
+PUSH DX
+PUSH DI
+PUSH SI
+
+DI = nuascD ;DI -> length of string
+CH = 0
+CL = DI.0 ;CX := length of string
+;
+;pre-fill the string with zeros
+DI++
+DO
+  DI.0 = '0'
+  DI++
+  LOOP
+END
+;
+DI = nuascD
+CH = DI.0 ;CH := length of string
+DI++
+AX = numbeD
+REPEAT
+  BX = 16
+  DX = 0
+  DIV BX ;DX:AX/BX -> AX remainder DX
+  IF (DL <= 9)
+     DL += 48 ; convert to character
+  ELSE
+     DL -= 10
+     DL += 'A'
+  ENDIF
+  DI.0 = DL
+  INC CL ;keep count of accumulated ascii digits
+  DEC CH
+  EXIT (Z)
+;  EXITuIF {AX = 0}
+  INC DI
+ENDREP
+;
+;we have the ascii representation left justified
+;but with digits reversed - we must rectify the reversal.
+;
+SI = nuascD
+SI.0 = CL ;so descriptor gets number length
+INC CL
+SHR CL,1 ;CL := INT((CL+1)/2)
+CH = 0
+SI += 1
+DO
+  AL = DI.0
+  AH = SI.0
+  SI.0 = AL
+  DI.0 = AH
+  INC SI
+  DEC DI
+  LOOP
+END
+
+POP SI
+POP DI
+POP DX
+POP CX
+POP BX
+}
+#ENDIF ;======
+;-----------------------------------
+pushall ()
+{
+axtempD = AX
+POP AX ;AX := return address
+retaddrD = AX
+AX = axtempD
+PUSH DS
+PUSH ES
+PUSH BP
+PUSH DI
+PUSH SI
+PUSH DX
+PUSH CX
+PUSH BX
+PUSH AX
+JMP retaddrD
+}
+;-----------------------------
+popall ()
+{
+POP AX
+retaddrD = AX
+POP AX
+POP BX
+POP CX
+POP DX
+POP SI
+POP DI
+POP BP
+POP ES
+POP DS
+JMP retaddrD
+}
+;------------------------
+promote_ct (ctD)
+WORD
+{
+; promote the CT entry in ctD to the MRU
+SAVE BX,DX,DI,SI,ES
+AX = cachesegD
+ES = AX
+DI = ct_mruD
+BX = ctD
+IF (DI <> BX)
+   ; take BX out of list
+   AX = ES.BX.CTlruD.D
+   SI = ES.BX.CTmruD.D
+   ES.SI.CTlruD.D = AX
+   IF (AX = 0FFFFH)
+      ct_lruD = SI
+   ELSE
+      PUSH BX
+      BX = AX
+      ES.BX.CTmruD.D = SI
+      POP BX
+   ENDIF
+   ; put BX at MRU
+   ES.DI.CTmruD.D = BX
+   ES.BX.CTlruD.D = DI
+   ES.BX.CTmruD.D = 0FFFFH
+   ct_mruD = BX
+ENDIF
+}
+;------------------------
+demote_ct (ctD)
+WORD
+{
+; demote the CT entry in ctD to the LRU
+SAVE BX,DX,DI,SI,ES
+AX = cachesegD
+ES = AX
+DI = ct_lruD
+BX = ctD
+IF (DI <> BX)
+   ; take BX out of list
+   AX = ES.BX.CTmruD.D
+   SI = ES.BX.CTlruD.D
+   ES.SI.CTmruD.D = AX
+   IF (AX = 0FFFFH)
+      ct_mruD = SI
+   ELSE
+      PUSH BX
+      BX = AX
+      ES.BX.CTlruD.D = SI
+      POP BX
+   ENDIF
+   ; put BX at LRU
+   ES.DI.CTlruD.D = BX
+   ES.BX.CTmruD.D = DI
+   ES.BX.CTlruD.D = 0FFFFH
+   ct_lruD = BX
+ENDIF
+}
+;------------------------
+scan_cache_for_sector ()
+{
+; scans the cache for the required sectors
+; Returns: NC if not in cache
+;          C if in cache, ES:AX = cache entry, DX = offset of sector (cache)
+
+SAVE BX,CX,DI
+AX = cachesegD
+ES = AX
+DI = ct_mruD
+XOR SI,SI
+REPEAT
+   DO
+      EXITL (ES.DI.CTfsector = 0)
+      AX = ES.DI.CTtrackD.D
+      EXITL (AX <> int13_trackD)
+      AL = ES.DI.CThead
+      EXITL (AL <> int13_head)
+      ;
+      ; we already have part of this track cached!!
+      ;
+      ; Note: if we have read priority and the track was last written to,
+      ;       then we must reread it all
+      ;
+      ; IF we are writing then there are two methods we can adopt:
+      ;    1) Read in those sectors we dont know about (if any) and return
+      ;       with the sectors in the cache
+      ;    2) Demote this CT so that it gets used for writing the new sectors
+      ; I think its best to do a mixture:
+      ;    If and only if all the required sectors are in the cache
+      ;    return with 'sectors in cache' else return with 'sectors NOT
+      ;    in cache' but demote this CT so it gets reused
+      ;
+      ;
+      ; IF we are reading then we can get the required extra sectors
+      ;
+      ; AL = CTfsector     : AH = AL + CTsectors - 1
+      ; CL = newfs         : CH = CL + newns - 1
+      ; Cases:
+      ;    IF (CL >= AL && CH <= AH) ; have all required sectors: break
+      ;    IF (CL > AH || CH < AL)   ; have none requested sectors
+      ;       IF (CL > AH)
+      ;          read from (AH + 1) for (CH - AH) sectors
+      ;          set fsector to AL, sectors to CH - AL + 1
+      ;       IF (CH < AL)
+      ;          read from CL for (AL - CL) sectors
+      ;          set fsector to CL, sectors to AH - CL + 1
+      ;    IF (CL >= AL && CL <= AH) || (CH >= AL && CH <=AH) ; have some sectors
+      ;       IF (CL < AL)
+      ;          read from CL for (AL - CL) sectors
+      ;          set fsector to CL, sectors to AH - CL + 1
+      ;       IF (CH > AH)
+      ;          read from (AH + 1) for (CH - AH) sectors
+      ;          set fsector to AL, sectors to CH - AL + 1
+      ;    IF (CL < AL && CH > AH) ; have some in middle
+      ;        read from CL for (CH - CL + 1) sectors
+      ;        set fsector to CL, set sectors to (CH - CL + 1)
+      ;  We now have the sector:
+      ;
+      BL = ES.DI.CTfsector
+      BH = BL + ES.DI.CTsectors
+      BH--
+      CL = newfs
+      CH = CL + newns
+      CH--
+      ;
+      IF (readpriority = 1 && int13_operation = 2) ; read
+         ; check priorities
+         IF (ES.DI.CTlastop = 3) ; write
+            ; invalidate the CT
+            clear_ct(DI)
+            EXITL
+         ENDIF
+      ENDIF
+      ;
+      IF (int13_operation = 3) ; write
+         IF (CL >= BL && CH <= BH)
+            SI = 1
+            EXITL
+         ENDIF
+         ; demote
+         demote_ct(DI)
+         EXITL
+      ENDIF
+      ;
+      IF (CL >= BL && CH <= BH)
+         ; have all sectors
+         SI = 1
+         EXITL
+      ENDIF
+      ;
+      ; Clever little ditty to act intelligently to bring in sectors through
+      ; a look ahead method
+      ;  AICOUNT = 0 (initially)
+      ;  DO
+      ;    IF AICOUNT = 0 && newns = 1  AICOUNT = newfs EXIT
+      ;    IF newfs = (AICOUNT+1) && newns = 1 AICOUNT = 0FFH EXIT
+      ;    IF AICOUNT = 0FFH && sectors = 1  sectors = spt - newfs + 1 AItk = 0
+      ;
+      DO
+         EXITL (restoftrack = 1 || readahead <> 0)
+         IF (aicount = 0 && newns = 1)
+            aicount = CL
+            AX = ES.DI.CTtrackD.D
+            DL = ES.DI.CTdrive
+            DH = ES.DI.CThead
+            aitrackD = AX
+            aihead = DH
+            aidrive = DL
+            EXIT
+         ENDIF
+         EXIT (aicount = 0)
+         DL = ES.DI.CTdrive
+         DH = ES.DI.CThead
+         AX = ES.DI.CTtrackD.D
+         IF (AX <> aitrackD || DH <> aihead || DL <> aidrive)
+            aicount = 0
+            EXIT
+         ENDIF
+         AL = aicount
+         AL++
+         IF (AL = CL && newns = 1)
+            CH = disk_spt
+            #IF DEBUG
+            PUSH AX
+            debugline(&aiguess,0)
+            POP AX
+            #ENDIF
+         ENDIF
+         aicount = 0
+      END
+      ;
+      ; check for read ahead
+      IF (readahead <> 0 && restoftrack = 0)
+         AL = CH + readahead
+         IF (AL > disk_spt)
+            AL = disk_spt
+         ENDIF
+         CH = AL
+      ENDIF
+      ;
+      IFL (CL > BH || CH < BL)   ; have none requested sectors
+         ; have none sectors
+         IF (CL > BH)
+            ; read from (BH + 1) for (CH - BH) sectors
+            ; set fsector to BL, sectors to CH - BL + 1
+            #IF DEBUG
+            debugline(&readextra,0)
+            #ENDIF
+            DL = BL
+            AL = CH - BL
+            AL++
+            DH = AL
+            CH -= BH
+            BH++
+            readsectorsfromCT(DI,BH,CH)
+            IF (NC)
+               ES.DI.CTfsector = DL
+               ES.DI.CTsectors = DH
+            ENDIF
+            SI++
+            EXITL
+         ENDIF
+         IF (CH < BL)
+            ; read from CL for (BL - CL) sectors
+            ; set fsector to CL, sectors to BH - CL + 1
+            #IF DEBUG
+            debugline(&readextra,0)
+            #ENDIF
+            DL = CL
+            AL = BH - CL
+            AL++
+            DH = AL
+            BL -= CL
+            readsectorsfromCT(DI,CL,BL)
+            IF (NC)
+               ES.DI.CTfsector = DL
+               ES.DI.CTsectors = DH
+            ENDIF
+            SI++
+            EXITL
+         ENDIF
+      ENDIF
+      ;
+      IFL ((CL >= BL && CL <= BH) || (CH >= BL && CH <=BH)) ; have some sectors
+         IF (CL < BL)
+            ; read from CL for (BL - CL) sectors
+            ; set fsector to CL, sectors to BH - CL + 1
+            #IF DEBUG
+            debugline(&readextra,0)
+            #ENDIF
+            DL = CL
+            AL = BH - CL
+            AL++
+            DH = AL
+            BL -= CL
+            readsectorsfromCT(DI,CL,BL)
+            IF (NC)
+               ES.DI.CTfsector = DL
+               ES.DI.CTsectors = DH
+            ENDIF
+            SI++
+            EXIT
+         ENDIF
+         IF (CH > BH)
+            ; read from (BH + 1) for (CH - BH) sectors
+            ; set fsector to BL, sectors to CH - BL + 1
+            #IF DEBUG
+            debugline(&readextra,0)
+            #ENDIF
+            DL = BL
+            AL = CH - BL
+            AL++
+            DH = AL
+            CH -= BH
+            BH++
+            readsectorsfromCT(DI,BH,CH)
+            IF (NC)
+               ES.DI.CTfsector = DL
+               ES.DI.CTsectors = DH
+            ENDIF
+            SI++
+            EXIT
+         ENDIF
+      ENDIF
+      IF (CL < BL && CH > BH)
+         ; we have the sectors in between what we want, must reread the track
+         ; read from CL for (CH-CL+1) sectors
+         ; set fsector to CL, sectors to (CH-CL+1)
+         #IF DEBUG
+         debugline(&readextra,0)
+         #ENDIF
+         DL = CL
+         DH = CH - CL
+         DH++
+         readsectorsfromCT(DI,DL,DH)
+         IF (NC)
+            ES.DI.CTfsector = DL
+            ES.DI.CTsectors = DH
+         ENDIF
+         SI++
+         EXIT
+      ENDIF
+    END
+    EXIT (SI = 1)
+    aicount = 0
+    DI = ES.DI.CTlruD.D
+    EXIT (DI = 0FFFFH)
+ENDREPL
+IF (SI = 1 && errorcode = 0)
+   AL = newfs
+   AL--
+   AH = 0
+   CX = disk_bpsD
+   MUL CX
+   DX = AX ; offset in CT segment of first sector
+   AX = DI ; address of CT entry
+   STC
+ELSE
+   CLC
+ENDIF
+}
+;------------------------
+readsectorsfromCT (ctoffD,ctfirst,ctnumber)
+WORD
+BYTE
+BYTE
+{
+; read sectors starting at ctfirst for ctnumber according
+; to information in CT ctoffD
+SAVE BX,CX,DX,SI,DI,ES
+AX = cachesegD
+ES = AX
+DI = ctoffD
+
+DL = ES.DI.CTdrive
+DH = ES.DI.CThead
+
+AL = ctfirst
+AH = 0
+AL--
+CX = disk_bpsD
+PUSH DX
+MUL CX
+POP DX
+SI = AX
+BX = ES.DI.CTsegD.D
+
+CX = ES.DI.CTtrackD.D
+
+AL = memorytype
+IF (AL = EXTENDED || AL = EXPANDED)
+   PUSH BX
+   BX = tracksegD
+ENDIF
+
+int13read(BX,SI,DL,DH,CX,ctfirst,ctnumber)
+; if fail CY
+errorcode = AH
+
+DO
+   EXIT (memorytype = CONVENTIONAL)
+   POP ES
+   EXIT (errorcode <> 0)
+   ; copy from the temp track into the cache
+   DI = SI
+   AL = ctnumber
+   AH = 0
+   CX = disk_bpsD
+   MUL CX
+   CX = AX
+
+   conv_to_cache(tracksegD,SI,CX,ES)
+
+   AH = errorcode
+END
+IF (errorcode = 0)
+   CLC
+ELSE
+   STC
+ENDIF
+}
+;------------------------
+read_from_cache (readctD,readsectorD)
+WORD
+WORD
+{
+; transfer from the cache into memory
+; sector at readsectorD in CT readCTD
+
+SAVE CX,DX,DI,SI
+
+; sector is in cache: readctD (CT), DX (sector offset in cache)
+AX = cachesegD
+ES = AX
+BX = readctD
+DX = ES.BX.CTsegD.D
+promote_ct(BX)
+DI = int13_buffer.0.D
+AX = int13_buffer.2.D
+ES = AX
+SI = readsectorD
+AX = disk_bpsD
+CL = newns
+CH = 0
+PUSH DX
+MUL CX
+POP DX
+CX = AX
+
+cache_to_conv (ES,DI,CX,DX,SI)
+
+}
+;------------------------
+cache_to_conv (csegD,coffD,cbytesD,ctsegD,ctoffD)
+WORD
+WORD
+WORD
+WORD
+WORD
+{
+SAVE BX,CX,DX,SI,DI,ES
+
+; copy the contents of the cache from offset ctoffD within the CT
+; to conventional memory at csegD:coffD for cbytesD bytes
+
+AL = memorytype
+DO
+   IF (AL = CONVENTIONAL)
+      PUSH DS
+      SI = ctoffD
+      DI = coffD
+      AX = csegD
+      ES = AX
+      CX = cbytesD
+      SHR CX,1
+      AX = ctsegD
+      IF (is386 = 0)
+         DS = AX
+         MOVS WIR
+      ELSE
+         SHR CX,1
+         DS = AX
+         #.386
+         MOVS DIR
+         #.8086
+      ENDIF
+      POP DS
+      EXITL
+   ENDIF
+   IF (AL = EXTENDED)
+      SI = &xmsblock
+      AX = cbytesD
+      SI.XMlen.0.D = AX
+      XOR AX,AX
+      SI.XMlen.2.D = AX
+      SI.XMhdestD.D = AX
+      AX = coffD
+      SI.XMdest.0.D = AX
+      AX = csegD
+      SI.XMdest.2.D = AX
+      AX = xmmhandleD
+      SI.XMhsourceD.D = AX
+      AX = ctsegD
+      CX = 512
+      MUL CX
+      AX += ctoffD
+      IF (C)
+         DX++
+      ENDIF
+      SI.XMsource.0.D = AX
+      SI.XMsource.2.D = DX
+      AH = 0BH
+      CALL DWORD PTR xms
+      EXIT
+   ENDIF
+   IF (AL = EXPANDED)
+      ; map expanded pages into EMM seg
+      ; find which LP the CT starts in
+      AX = ctsegD ; 512 byte page
+      CX = 512
+      MUL CX
+      CX = 16384 ; 16K
+      DIV CX
+      ; LPn is in AX, offset in DX
+      ; map LPn,n+1 into PP0,1 as the CT will not be bigger than 32K
+      PUSH DX ; save offset
+      DX = emmhandleD
+      BX = AX
+      PUSH BX
+      AX = 4400H
+      INT 67H
+      POP BX
+      BX++
+      AX = 4401H
+      INT 67H
+      ; CT is now in emmsegD:offset
+      POP AX ; offset
+      CX = 16
+      XOR DX,DX
+      DIV CX
+      AX += emmsegD
+      ; segment is in AX
+      DX = AX
+      ; start of CT is at ES:0
+      SI = ctoffD
+      DI = coffD
+      AX = csegD
+      ES = AX
+      PUSH DS
+      CX = cbytesD
+      SHR CX,1
+      IF (is386 = 0)
+         DS = DX
+         MOVS WIR
+      ELSE
+         SHR CX,1
+         DS = DX
+         #.386
+         MOVS DIR
+         #.8086
+      ENDIF
+      POP DS
+      EXIT
+   ENDIF
+END
+
+}
+;------------------------
+read_into_cache ()
+{
+
+SAVE BX,CX
+
+; read the requested sectors into the cache
+AX = cachesegD
+ES = AX
+DI = ct_lruD
+REPEAT
+   EXIT (ES.DI.CTlocked = 0)
+   DI = ES.DI.CTmruD.D
+   EXIT (DI = 0FFFFH)
+ENDREP
+IF (DI = 0FFFFH)
+   ; all CTs are locked
+   ; so read from disk to memory
+   CL = newfs
+   CH = newns
+   DL = int13_drive
+   DH = int13_head
+   BX = int13_buffer.0.D
+   AX = int13_buffer.2.D
+   ES = AX
+   int13read(ES,BX,DL,DH,int13_trackD,CL,CH)
+   errorcode = AH
+   ;
+   AX = 0FFFFH
+   CLC
+   RETURN
+ENDIF
+
+CL = newfs
+CH = 0
+CL--
+AX = disk_bpsD
+MUL CX
+BX = AX
+CL++
+
+DH = int13_head
+DL = int13_drive
+AX = ES.DI.CTsegD.D
+ES = AX
+
+CH = newns
+IF (restoftrack = 1)
+   AL = disk_spt
+   CH = AL - CL + 1
+ELSE
+   IF (readahead <> 0)
+      AL = CL + CH - 1
+      IF (AL < disk_spt)
+         AL += readahead
+         IF (AL > disk_spt)
+            AL = disk_spt
+         ENDIF
+         AL -= CL
+         AL++
+         CH = AL
+      ENDIF
+   ENDIF
+ENDIF
+
+; use the temporary track
+AL = memorytype
+IF (AL = EXTENDED || AL = EXPANDED)
+   PUSH ES
+   AX = tracksegD
+   ES = AX
+ENDIF
+
+int13read(ES,BX,DL,DH,int13_trackD,CL,CH)
+; returns AX and Cflag with codes
+errorcode = AH
+
+DO
+   EXIT (memorytype = CONVENTIONAL)
+   POP ES
+   EXIT (errorcode <> 0)
+   ; copy temp track into cache
+   PUSH CX
+   PUSH DX
+   PUSH DI
+   SI = BX
+   DI = BX
+   AL = CH
+   AH = 0
+   CX = disk_bpsD
+   MUL CX
+   CX = AX
+
+   conv_to_cache (tracksegD,SI,CX,ES)
+
+   POP DI
+   POP DX
+   POP CX
+END
+
+IFL (errorcode = 0)
+   PUSH BX
+   AX = cachesegD
+   ES = AX
+   ES.DI.CTfsector = CL
+   ES.DI.CTsectors = CH
+   BX = int13_trackD
+   ES.DI.CTtrackD.D = BX
+   DH = int13_head
+   ES.DI.CThead = DH
+   DL = int13_drive
+   ES.DI.CTdrive = DL
+   ES.DI.CTlastop = 2 ; read
+   ;
+   ; special code to deal with the floppy disks
+   ; if this is the first read of the boot sector, then we must
+   ; extract bps and spt
+   IF (CL = 1 && BX = 0 && DH = 0 && (DL = 0 || DL = 1))
+      ; boot sector of a floppy drive
+      #IF DEBUG
+      debugline(&floppy,0)
+      #ENDIF
+      ES.DI.CTlocked = 1
+      PUSH ES
+      IF (DL = 0)
+         floppy0ok = 1
+      ELSE
+         floppy1ok = 1
+      ENDIF
+      SI = &drivetable
+      AL = DL
+      AH = 0
+      CX = DRIVEDEF
+      MUL CX
+      SI += AX
+      AL = memorytype
+      IF (AL = CONVENTIONAL)
+         ; look at CTsegD:0B for bps
+         AX = ES.DI.CTsegD.D
+         ES = AX
+      ELSE
+         AX = tracksegD
+         ES = AX
+      ENDIF
+      AX = ES.0BH.D ; bps
+      SI.DRVbpsD.D = AX
+      disk_bpsD = AX
+      AX = ES.18H.D
+      SI.DRVspt = AL
+      disk_spt = AL
+      POP ES
+   ENDIF
+   POP BX
+   promote_ct(DI)
+   CLC
+ELSE
+   ; invalidate the CT
+   ES.DI.CTfsector = 0
+   STC
+ENDIF
+
+AX = DI ; CT entry
+DX = BX ; offset of first sector
+}
+;------------------------
+conv_to_cache (csegD,coffD,cbytesD,ctsegD)
+WORD
+WORD
+WORD
+WORD
+{
+SAVE BX,CX,DX,DI,SI,ES
+
+; copy data from conventional memory (csegD:coffD) into the
+; cache at offset csegD within the CT, for cbytesD bytes.
+
+AL = memorytype
+DO
+   IF (AL = CONVENTIONAL)
+      PUSH DS
+      SI = coffD
+      DI = SI
+      AX = ctsegD
+      ES = AX
+      CX = cbytesD
+      SHR CX,1
+      AX = csegD
+      IF (is386 = 0)
+         DS = AX
+         MOVS WIR
+      ELSE
+         SHR CX,1
+         DS = AX
+         #.386
+         MOVS DIR
+         #.8086
+      ENDIF
+      POP DS
+      EXITL
+   ENDIF
+   IF (AL = EXTENDED)
+      SI = &xmsblock
+      AX = cbytesD
+      SI.XMlen.0.D = AX
+      XOR AX,AX
+      SI.XMlen.2.D = AX
+      SI.XMhsourceD.D = AX
+      AX = coffD
+      SI.XMsource.0.D = AX
+      AX = csegD
+      SI.XMsource.2.D = AX
+      AX = xmmhandleD
+      SI.XMhdestD.D = AX
+      AX = ctsegD
+      CX = 512
+      MUL CX
+      AX += coffD
+      IF (C)
+         DX++
+      ENDIF
+      SI.XMdest.0.D = AX
+      SI.XMdest.2.D = DX
+      AH = 0BH
+      CALL DWORD PTR xms
+      EXIT
+   ENDIF
+   IF (AL = EXPANDED)
+      ; map required page into emmsegD
+      ; find which LP the CT starts in
+      AX = ctsegD ; 512 byte page
+      CX = 512
+      MUL CX
+      CX = 16384 ; 16K
+      DIV CX
+      ; LPn is in AX, offset in DX
+      ; map LPn,n+1 into PP0,1 as the CT will not be bigger than 32K
+      PUSH DX ; save offset
+      DX = emmhandleD
+      BX = AX
+      PUSH BX
+      AX = 4400H
+      INT 67H
+      POP BX
+      BX++
+      AX = 4401H
+      INT 67H
+      ; CT is now in emmsegD:offset
+      POP AX ; offset
+      CX = 16
+      XOR DX,DX
+      DIV CX
+      AX += emmsegD
+      ; segment is in AX
+      ES = AX
+      ; start of CT is at ES:0
+      DI = coffD
+      SI = DI
+      PUSH DS
+      CX = cbytesD
+      SHR CX,1
+      AX = csegD
+      IF (is386 = 0)
+         DS = AX
+         MOVS WIR
+      ELSE
+         SHR CX,1
+         DS = AX
+         #.386
+         MOVS DIR
+         #.8086
+      ENDIF
+      POP DS
+      EXIT
+   ENDIF
+END
+}
+;------------------------
+int13read (i13segD,i13offD,i13drive,i13head,i13trackD,i13fsec,i13secs)
+WORD
+WORD
+BYTE
+BYTE
+WORD
+BYTE
+BYTE
+{
+SAVE BX,CX,DX,SI,DI,ES
+
+; read from the disk via old INT13
+DI = 2
+REPEAT
+   PUSH DI
+   CL = i13fsec
+   AX = i13trackD
+   CH = AL
+   SHR AX,1
+   SHR AX,1
+   AND AL,11000000B
+   OR CL,AL
+   DH = i13head
+   DL = i13drive
+   AX = i13segD
+   ES = AX
+   BX = i13offD
+   AL = i13secs
+
+   AH = 2
+   CLI
+   PUSHF
+   CALL DWORD PTR normINT13
+   POP DI
+   EXIT (NC)
+   ;
+   DI--
+   IF (DI = 0)
+      STC
+      EXIT
+   ENDIF
+   AH = 0
+   DL = drive
+   IF (DL = 0FFH)
+      DL = 80H
+   ENDIF
+   CLI
+   PUSHF
+   CALL DWORD PTR normINT13
+ENDREP
+
+PUSHF
+PUSH AX
+physicals.0.D += 1
+IF (C)
+   physicals.2.D += 1
+ENDIF
+POP AX
+POPF
+
+}
+;------------------------
+int13write (i13segD,i13offD,i13drive,i13head,i13trackD,i13fsec,i13secs)
+WORD
+WORD
+BYTE
+BYTE
+WORD
+BYTE
+BYTE
+{
+SAVE BX,CX,DX,SI,DI,ES
+
+; write to the disk via old INT13
+DI = 2
+REPEAT
+   PUSH DI
+   CL = i13fsec
+   AX = i13trackD
+   CH = AL
+   SHR AX,1
+   SHR AX,1
+   AND AL,11000000B
+   OR CL,AL
+   DH = i13head
+   DL = i13drive
+   AX = i13segD
+   ES = AX
+   BX = i13offD
+   AL = i13secs
+
+   AH = 3
+   CLI
+   PUSHF
+   CALL DWORD PTR normINT13
+   POP DI
+   EXIT (NC)
+   ;
+   DI--
+   IF (DI = 0)
+      STC
+      EXIT
+   ENDIF
+   AH = 0
+   DL = drive
+   IF (DL = 0FFH)
+      DL = 80H
+   ENDIF
+   CLI
+   PUSHF
+   CALL DWORD PTR normINT13
+ENDREP
+
+PUSHF
+PUSH AX
+physicals.0.D += 1
+IF (C)
+   physicals.2.D += 1
+ENDIF
+POP AX
+POPF
+
+}
+;------------------------
+write_to_cache (writectD)
+WORD
+WORD
+{
+
+; Transfer from memory to the cache and promote,
+
+SAVE BX,CX
+
+; copy the requested sectors into the cache from memory
+AX = cachesegD
+ES = AX
+SI = writectD
+promote_ct(SI)
+
+ES.SI.CTlastop = 3 ; write
+AL = int13_drive
+ES.SI.CTdrive = AL
+AL = int13_head
+ES.SI.CThead = AL
+AX = int13_trackD
+ES.SI.CTtrackD.D = AX
+BL = newns
+ES.SI.CTsectors = BL
+AL = newfs
+ES.SI.CTfsector = AL
+
+AL--
+AH = 0
+CX = disk_bpsD
+MUL CX
+DI = AX
+
+AL = BL
+AH = 0
+MUL CX
+CX = AX
+
+; copy the sectors from memory into the cache
+PUSH SI ; save CT entry
+PUSH ES
+
+AX = ES.SI.CTsegD.D ; dest seg
+ES = AX
+
+AL = memorytype
+IF (AL = EXTENDED || AL = EXPANDED)
+   ; use temp track
+   PUSH ES
+   AX = tracksegD
+   ES = AX
+ENDIF
+
+; copy to conv memory or to temp track
+PUSH CX
+PUSH DI
+PUSH DS
+SI = int13_buffer.0.D
+AX = int13_buffer.2.D
+SHR CX,1
+IF (is386 = 0)
+   DS = AX
+   MOVS WIR
+ELSE
+   SHR CX,1
+   DS = AX
+   #.386
+   MOVS DIR
+   #.8086
+ENDIF
+POP DS
+POP DI
+POP CX
+
+AL = memorytype
+IF (AL = EXTENDED || AL = EXPANDED)
+   ; copy temp track to cache
+   POP ES
+   conv_to_cache(tracksegD,DI,CX,ES)
+ENDIF
+
+POP ES
+POP SI ; restore ES entry
+
+}
+;------------------------
+write_to_disk ()
+{
+; write the INT13 call to disk
+
+SAVE BX,CX,DX,SI
+
+BX = int13_buffer.0.D
+AX = int13_buffer.2.D
+ES = AX
+SI = int13_trackD
+DL = int13_drive
+DH = int13_head
+CL = newfs
+CH = newns
+
+int13write(ES,BX,DL,DH,SI,CL,CH)
+; returns C if error
+errorcode = AH
+
+}
+;------------------------
+compare_cache (cctD)
+WORD
+WORD
+{
+; compare the cache sectors at CT cctD, offset csectorD
+; with whats in memory at int13_buffer
+
+SAVE BX,CX,DX
+
+AX = cachesegD
+ES = AX
+
+IF (allowredundant = 1)
+   CLC
+   RETURN
+ENDIF
+
+BX = cctD
+DX = ES.BX.CTsegD.D
+
+PUSH DX
+AL = newfs
+AH = 0
+AL--
+CX = disk_bpsD
+MUL CX
+SI = AX
+
+AL = newns
+AH = 0
+MUL CX
+CX = AX
+POP DX
+
+DI = int13_buffer.0.D
+AX = int13_buffer.2.D
+ES = AX
+
+AL = memorytype
+IF (AL = EXTENDED || AL = EXPANDED)
+   ; copy from cache to temp track first
+   cache_to_conv(tracksegD,SI,CX,DX,SI)
+   DX = tracksegD
+ENDIF
+
+PUSH DS
+DS = DX
+CLD
+REPZ CMPSB
+POP DS
+IF (CX = 0)
+   ; equal
+   STC
+ELSE
+   ; not equal
+   CLC
+ENDIF
+}
+;------------------------
+flush_cache (fdrive)
+BYTE
+{
+; clear the cache of drive fdrive (if fdrive = 0FFH - all drives)
+AX = cachesegD
+ES = AX
+DI = ct_lruD
+REPEAT
+   AL = ES.DI.CTdrive
+   IF (AL = fdrive || fdrive = 0FFH)
+      clear_ct (DI)
+   ENDIF
+   DI = ES.DI.CTmruD.D
+   EXIT (DI = 0FFFFH)
+ENDREP
+
+; clear vaiables
+XOR AX,AX
+aicount = AL
+logicals.0.D = AX
+logicals.2.D = AX
+physicals.0.D = AX
+physicals.2.D = AX
+IF (fdrive = 0 || fdrive = 0FFH)
+   floppy0ok = AL
+ENDIF
+IF (fdrive = 1 || fdrive = 0FFH)
+   floppy1ok = AL
+ENDIF
+
+}
+;------------------------
+clear_ct (cctD)
+WORD
+{
+; clear a CT entry
+PUSH DI
+DI = cctD
+XOR AX,AX
+ES.DI.CTtrackD.D = AX
+ES.DI.CTdrive = AL
+ES.DI.CThead = AL
+ES.DI.CTfsector = AL
+ES.DI.CTsectors = AL
+ES.DI.CTlocked = AL
+ES.DI.CTlastop = AL
+POP DI
+}
+;------------------------
+testdrive(drv)
+BYTE
+{
+; test to see if the drive is enabled in the drivetable
+PUSH BX
+PUSH CX
+PUSH DX
+BX = &drivetable
+AL = drv
+IF (AL >= 80H)
+   AL -= 80H
+   AL += 2
+ENDIF
+CL = DRIVEDEF
+MUL CL
+BX += AX
+IF (BX.DRVid = drv && BX.DRVtype <> 0)
+   AL = drv
+   IF (AL = 0 && floppy0ok = 0)
+      BX.DRVspt = 8
+   ENDIF
+   IF (AL = 1 && floppy1ok = 0)
+      BX.DRVspt = 8
+   ENDIF
+   AL = BX.DRVspt
+   disk_spt = AL
+   AX = BX.DRVbpsD.D
+   disk_bpsD = AX
+   AL = BX.DRVheads
+   disk_heads = AL
+   STC
+ELSE
+   #IF DEBUG
+   debugline(&wrongdrive,1)
+   #ENDIF
+   CLC
+ENDIF
+POP DX
+POP CX
+POP BX
+}
+;------------------------
+check_for_more ()
+{
+; checks to see if there are more tracks to read
+; and sets up the varaibles
+; Returns C if more
+
+PUSH BX
+PUSH CX
+PUSH DX
+
+IF (int13_sectors = 0 || moretodo = 0)
+   CLC
+ELSE
+   ; update the address
+   BX = int13_buffer.0.D
+   AL = newns
+   AH = 0
+   CX = disk_bpsD
+   MUL CX
+   BX += AX
+   IF (C)
+      int13_buffer.2.D += 1000H
+   ENDIF
+   int13_buffer.0.D = BX
+   ;
+   moretodo--
+   newfs = 1
+   DH = int13_head
+   DH++
+   IF (DH = disk_heads)
+      int13_trackD++
+      DH = 0
+   ENDIF
+   int13_head = DH
+   CL = int13_sectors
+   IF (CL > disk_spt)
+      CL -= disk_spt
+      newns = disk_spt
+   ELSE
+      newns = CL
+      CL = 0
+   ENDIF
+   int13_sectors = CL
+   STC
+ENDIF
+POP DX
+POP CX
+POP BX
+}
+;------------------------
+uninstall_tsr ()
+{
+
+; uninstall ourselves from memory
+
+DO
+   ; see if the INT13 vector is ours
+   AX = 3513H
+   INT 21H
+   AX = ES
+   CX = CS
+   IF (AX <> CX)
+      CLC
+      EXITL
+   ENDIF
+   ;
+   ; restore INT 13
+   PUSH DS
+   DX = normINT13.0.D
+   AX = normINT13.2.D
+   DS = AX
+   AX = 2513H
+   INT 21H
+   POP DS
+   ;
+   ; free conventional memory
+   AX = pspD
+   ES = AX
+   AH = 49H
+   INT 21H
+   ;
+   ; free CTs if not CONVENTIONAL
+   AX = cachesegD
+   ES = AX
+   XOR DI,DI
+   CX = number_ctsD
+   AL = memorytype
+   DO
+      EXIT (AL = CONVENTIONAL)
+      IF (AL = EXTENDED)
+         BX = xmmhandleD
+         IF (BX <> 0)
+            dealoc_extended(BX)
+         ENDIF
+         EXIT
+      ENDIF
+      IF (AL = EXPANDED)
+         BX = emmhandleD
+         IF (BX <> 0)
+            dealoc_expanded(BX)
+         ENDIF
+      ENDIF
+   END
+   ;
+   ; free any UMBs we might have used
+   DO
+      EXIT (umbs = 0 || umbs = 0FFH)
+      AL = umbs
+      TEST AL,1
+      IF (NZ)
+         ; free the CT
+         PUSH AX
+         dealoc_umb(cachesegD)
+         POP AX
+      ENDIF
+      TEST AL,2
+      IF (NZ)
+         ; free the temp track
+         BX = tracksegD
+         IF (BX <> 0)
+            dealoc_umb(BX)
+         ENDIF
+      ENDIF
+   END
+   ;
+   STC
+END
+}
+;------------------------
+dealoc_extended (xhandleD)
+WORD
+{
+; deallocate the XMB
+DX = xhandleD
+AH = 0AH
+CALL DWORD PTR xms
+}
+;------------------------
+dealoc_expanded(phandleD)
+WORD
+{
+; dealocate the EMB
+DX = phandleD
+AH = 45H
+INT 67H
+}
+;------------------------
+dealoc_umb (uhandleD)
+WORD
+{
+; deallocate the UMB
+AX = uhandleD
+ES = AX
+AH = 49H
+INT 21H
+}
+;------------------------
+savestate()
+{
+SAVE AX,BX,DX,ES
+AL = memorytype
+DO
+   EXIT (AL = CONVENTIONAL)
+   IF (AL = EXTENDED)
+      ; get state of A20 line
+      AH = 7
+      CALL DWORD PTR xms
+      a20state = AL
+      EXIT
+   ENDIF
+   IF (AL = EXPANDED)
+      ; save page map
+      AH = 47H
+      DX = emmhandleD
+      INT 67H
+      EXIT
+   ENDIF
+END
+}
+;------------------------
+restorestate()
+{
+SAVE AX,BX,DX,ES
+AL = memorytype
+DO
+   EXIT (AL = CONVENTIONAL)
+   IF (AL = EXTENDED)
+      ; restore A20 line
+      AH = 5 ; enable
+      IF (a20state = 0)
+         AH++ ; disable
+      ENDIF
+      CALL DWORD PTR xms
+      EXIT
+   ENDIF
+   IF (AL = EXPANDED)
+      ; restore page map
+      AH = 48H
+      DX = emmhandleD
+      INT 67H
+      EXIT
+   ENDIF
+END
+}
+;------------------------
+waitfffb ()
+{
+PUSH AX
+PUSH DX
+DX = 03DAH
+;wait for ffb
+DO
+   IN AL,DX
+   AND AL,00001000B
+   CONTINUE (Z)
+END
+POP DX
+POP AX
+}
+;-----------------------------
+invertvideo ()
+{
+AH = AL
+IF (displayparaD = 0B000H)
+   AND AH,01110000B
+   AND AL,00000111B
+   IF (AH = 70H && AL = 0)
+      AL = 00001111B
+   ELSE
+      AL = 01110000B
+   ENDIF
+ELSE
+   CL = 4
+   SHL AH,CL
+   SHR AL,CL
+   OR AL,AH
+   AND AL,07FH
+ENDIF
+}
+;-----------------------------
+sethit()
+{
+PUSH AX
+PUSH CX
+PUSH ES
+waitfffb()
+AX = displayparaD
+ES = AX
+AX = ES.158.D
+oldhitD = AX
+AL = AH
+invertvideo()
+AH = AL
+AL = 'H'
+ES.158.D = AX
+POP ES
+POP CX
+POP AX
+}
+;------------------------
+clearhit()
+{
+PUSH AX
+PUSH ES
+waitfffb()
+AX = displayparaD
+ES = AX
+AX = oldhitD
+ES.158.D = AX
+POP ES
+POP AX
+}
+;------------------------
+; END OF RESIDENT CODE
+;------------------------
+init_data ()
+{
+; this 16K chunk will allow room for 1024 descriptors
+; which can contain 8Mb of cache
+LIST bootsector (16384)	; space for reading in sector of HD
+	; also for allowing gap for CT descriptors
+	; so we dont overwrite our code!
+LIST initstack (280)
+
+#IF DVERSION
+MESSAGE start0d = 'MI Systems  MI-CACHE Disk Cache Utility  Version 1.0 (DEBUG)'
+#ELSE
+MESSAGE start0 = 'MI Systems  MI-CACHE Disk Cache Utility  Version 1.0'
+#ENDIF
+MESSAGE start1 = 'Copyright (C) 1992. All rights reserved.'
+MESSAGE nodrive = 'Must specify drive'
+MESSAGE errordrive = 'Error in determining drive'
+MESSAGE invalidparam = 'Invalid parameter'
+MESSAGE baddos = 'Must have DOS version 2.10 or greater'
+MESSAGE baddosumb = 'Must have DOS version 5.0 to use UMBs'
+MESSAGE insufmem = 'Insufficient memory to create cache'
+MESSAGE instld = 'MI-CACHE is now loaded'
+MESSAGE uninstalled = 'MI-CACHE has been unloaded from memory'
+MESSAGE cannotunin = 'Unable to unload MI-CACHE'
+MESSAGE notinstalled = 'MI-CACHE is not loaded'
+MESSAGE alreadyin = 'MI-CACHE is already loaded'
+MESSAGE reqtoosmall = 'Cache must be at least 64K - adjusting size'
+
+MESSAGE xmmnotexist = 'Extended Memory Manager is not loaded'
+MESSAGE emmnotexist = 'Expanded Memory Manager is not loaded'
+MESSAGE emmwrong = 'Require EMM Version 3.2 or greater'
+MESSAGE umbnotexist = 'Upper Memory Blocks are not available'
+MESSAGE errorincmemaloc = 'Memory allocation error'
+MESSAGE errorinxmemaloc = 'Error whilst allocating extended memory'
+MESSAGE errorinememaloc = 'Error whilst allocating expanded memory'
+
+MESSAGE cachedisabled = 'MI-CACHE has been disabled'
+MESSAGE cacheenabled = 'MI-CACHE has been enabled'
+MESSAGE butdisabled = ', but disabled'
+MESSAGE flushed = 'Cache has been flushed'
+
+MESSAGE cacheisin = 'Cache is in '
+MESSAGE ext_t = 'extended memory'
+MESSAGE exp_t = 'expanded memory'
+MESSAGE con_t = 'conventional memory'
+MESSAGE codeused = 'Conventional memory used = '
+MESSAGE mcacheused = 'Size of cache            = '
+MESSAGE ink = ' Kbytes'
+
+LIST emmname = 'EMMXXXX0',0
+
+WORD strategyD
+BYTE linkflag
+
+LIST hugetable (12)
+
+LIST dnumber (12)
+}
+;------------------------
+init ()
+{
+AX = ES
+pspD = AX
+AX = DS
+datasegD = AX
+
+#IF DVERSION
+displayline(&start0d,1)
+#ELSE
+displayline(&start0,1)
+#ENDIF
+displayline(&start1,1)
+displayNL()
+
+; free the envirnment block
+AX = ES.2CH.D
+ES = AX
+AH = 49H
+INT 21H
+
+; get the DOS version
+AX = 3000H
+INT 21H
+XCHG AL,AH
+IF (AX < 020AH)
+   displayline(&baddos,1)
+   CLC
+   RETURN
+ENDIF
+dosversionD = AX
+
+; we need to know if we are already installed
+; see if we are installed
+installed = 0
+AX = 0FF00H
+CL = 'M'
+CH = 'I'
+INT 13H
+IF (CL = 'O' && CH = 'k')
+   installed = 1
+ENDIF
+
+; parse the command line
+requestedKD = 0
+memorytype = MEMUNDEFINED
+dosdrive = 0FFH
+readahead = 0
+restoftrack = 1
+aicount = 0
+allowredundant = 0
+minimise = 0
+AX = pspD
+ES = AX
+SI = 80H
+CL = ES.SI.0
+CH = 0
+SI++
+DO
+   EXITL (CL = 0)
+   AL = ES.SI.0
+   SI++
+   EXITL (AL = 13)
+   CONTINUE (AL = 32)
+   uppercase()
+   IF (AL >= 'A' && AL <= 'Z')
+      ; assume a drive
+      AH = ES.SI.0
+      SI++
+      EXITL (AH = 13)
+      IF (AH = ':')
+         dosdrive = AL - 'A'
+         CONTINUE
+      ENDIF
+      ; invalid parameter
+   ENDIF
+   IF (AL >= '0' && AL <= '9')
+      ; assume memory size
+      SI--
+      cl_asc2num()
+      ; DX has requested K, AL has last char
+      PUSH AX
+      BX = DX
+      requestedKD = BX
+      IF (BX < 64)
+         displayline(&reqtoosmall,1)
+         requestedKD = 64
+      ENDIF
+      POP AX
+      EXIT (AL = 13)
+      CONTINUEL
+   ENDIF
+   IF (AL = '-' || AL = '/')
+      ; parameters
+      AL = ES.SI.0
+      SI++
+      EXIT (AL = 13)
+      uppercase()
+      parseparameter(AL)
+      CONTINUEL (C) ; ok
+      ; invalid parameter
+   ENDIF
+   ; invalid
+   displayline(&invalidparam,1)
+   CLC
+   RETURN
+END
+
+; If dosdrive = 0FFH - cache any drive  Set drive = 0FFH
+; If dosdrive <> 0FFH - cache this drive only Set drive to dosdrive
+IFL (uninstall = 1)
+   IF (installed = 0)
+      displayline(&notinstalled,1)
+      AX = 4C01H
+      INT 21H
+   ENDIF
+   ; ask MICACHE to free all of its memory and restore the vectors
+   AX = 0FF01H
+   CL = 'M'
+   CH = 'I'
+   INT 13H
+   IF (AL = 'O' && AH = 'k')
+      ; successful
+      displayline(&uninstalled,1)
+      AL = 0
+   ELSE
+      ; cannot uninstall
+      displayline(&cannotunin,1)
+      AL = 1
+   ENDIF
+   AH = 4CH
+   INT 21H
+ENDIF
+IF (displaycache = 1)
+   AX = 0FF02H
+   CL = 'M'
+   CH = 'I'
+   INT 13H
+   AX = 4C00H
+   INT 21H
+ENDIF
+
+AL = dosdrive
+IF (AL = 0FFH && installed = 0)
+   displayline(&nodrive,1)
+   AX = 4C01H
+   INT 21H
+ENDIF
+IF (AL >= 2)
+   AL -= 2
+   OR AL,80H
+ENDIF
+drive = AL
+
+IFL (installed = 1)
+   ; use only installed features
+   DO
+      IF (disable = 1)
+         ; disable the cache
+         AX = 0FF03H
+         DL = 0
+         CL = 'M'
+         CH = 'I'
+         INT 13H
+         ; assume ok
+         displayline(&cachedisabled,1)
+         EXITL
+      ENDIF
+      IF (disable = 2)
+         ; enable the cache
+         AX = 0FF03H
+         CL = 'M'
+         CH = 'I'
+         DL = 1
+         INT 13H
+         ; assume ok
+         displayline(&cacheenabled,1)
+         EXITL
+      ENDIF
+      IF (rflush = 1)
+         ; flush the cache
+         AX = 0FF04H
+         CL = 'M'
+         CH = 'I'
+         INT 13H
+         ; assume ok
+         displayline(&flushed,1)
+         EXIT
+      ENDIF
+      IF (showmeasures = 1)
+         ; get cache measurements
+         AX = 0FF05H
+         CL = 'M'
+         CH = 'I'
+         INT 13H
+         ; assume ok, ES:BX points to measurement data
+         ; DX has size of cache (K), AL has memory type
+         show_measurements(DX,ES,BX,AL)
+         EXIT
+      ENDIF
+      IF (showparas = 1)
+         ; get cache parameters
+         AX = 0FF06H
+         CL = 'M'
+         CH = 'I'
+         INT 13H
+         ; assume ok, ES:BX points to parameter table, AL mem
+         show_parameters(ES,BX,AL)
+         EXIT
+      ENDIF
+      installedhelp()
+   END
+   AX = 4C00H
+   INT 21H
+ENDIF
+
+; check we have DOS 5.0 for UMBs
+umbs = 0FFH
+IF (dosversionD < 0500H)
+   umbs = 0
+ENDIF
+; check if the UMBs exist by trying to allocate one
+;
+; allocate UMB block and return segment in AX and C
+; else NC and if no umbs AX =0FFFFH, or AX = avail paras
+aloc_umb(24576) ; in paras (384K)
+IF (AX = 0FFFFH)
+   umbs = 0
+ENDIF
+;
+; umbs = 0    - no UMBs
+;      = 0FFH - have UMBs but we dont use any
+;      = 1    - use UMB for CT descriptors
+;      = 2    - use UMB for temp track
+;      = 3    - use UMBs for both
+
+check_memory()
+IF (NC)
+   AX = 4C02H
+   INT 21H
+ENDIF
+
+; we want requestedparsD after the end of our code
+;AX = &endofcode
+AX = &init_data
+AX += 15
+CX = 16
+XOR DX,DX
+DIV CX
+CX = CS
+AX += CX
+AX += 2
+; ax has segment address of free memory, ie. cache descriptors + cache
+cachesegD = AX
+
+getdisplaytype()
+build_drive_table()
+IF (NC)
+   displayline(&errordrive,1)
+   AX = 4C01H
+   INT 21H
+ENDIF
+
+; NOTE: the above method must take into accout for differert formats of
+; drive, ie: 3inch floppy can be 9 or 18 sectors, but this will only
+; report 19 as the maximum, and Hard disk of 17 sectors!!
+; In our AI methods we need to know the exact number of spt of the disk!
+;
+; To do this: use INT13 (08H) to get the number of floppy drives in DL, and
+; INT13 (15H) with DL = 80H,81H.. to get the type of each hard disk (AL) - if
+; AL <> 3 then no more hard disks
+  
+; calculate the size of one CT
+AX = max_bpsD
+CX = max_sptD
+MUL CX
+ct_lengthD = AX
+CX = 16
+DIV CX
+ct_lengthinparasD = AX
+
+; calculate how many CTs we can have
+AX = requestedKD
+CX = 1024
+MUL CX
+; in bytes
+CX = ct_lengthD
+DIV CX
+; in AX
+number_ctsD = AX
+
+; first we should try and allocate UMBs for the cache descriptors
+;
+; cachesegD points to the first CACHETRACK descriptor
+AX = number_ctsD
+CX = CACHETRACK
+MUL CX
+; ax has size of CACHETRACK descriptors
+AX += 15
+CX = 16
+DIV CX
+; ax has descriptor size in paras
+AX += 2
+BX = AX
+DO
+   IF (umbs <> 0)
+      aloc_umb(BX) ; allocate in paras
+      IF (C) ; ok
+         BX = cachesegD
+         cachesegD = AX
+         umbs = 1
+         EXIT
+      ENDIF
+   ENDIF
+   ; failed with umbs - use conv
+   AX = cachesegD ; seg of descriptors
+   BX += AX ; seg of cache
+END
+; BX has free para
+
+; we also need a temporary track if we are not using conventional memory
+tracksegD = 0
+DO
+   EXIT (memorytype <> EXTENDED && memorytype <> EXPANDED)
+   ;
+   AX = max_bpsD
+   CX = max_sptD
+   MUL CX
+   CX = 16
+   DIV CX
+   ; ax has length of temp track in paras
+   AX += 2
+   ;
+   ; try for the umbs again
+   IF (umbs <> 0)
+      PUSH AX
+      aloc_umb(AX) ; in paras
+      IF (C)
+         ; ok
+         tracksegD = AX
+         umbs += 2
+         EXIT
+      ENDIF
+      POP AX
+   ENDIF
+   ; failed - use conv
+   tracksegD = BX
+   BX += AX
+END
+
+; clear the CACHETRACK descriptors
+AX = cachesegD
+ES = AX
+XOR DI,DI
+AX = number_ctsD
+CX = CACHETRACK
+MUL CX
+CX = AX
+XOR AX,AX
+STOS BIR
+
+; alocate the CT segments and put them into the CT descriptors
+DO
+   AL = memorytype
+   IF (AL = CONVENTIONAL)
+      memaloc_conv(BX) ; returns AX with free seg
+      IF (NC)
+         ; error in memory allocation
+         displayline(&errorincmemaloc,1)
+         CLC
+      ENDIF
+      EXIT
+   ENDIF
+   IF (AL = EXTENDED)
+      memaloc_extended(BX)
+      IF (NC)
+         ; error in memory allocation
+         displayline(&errorinxmemaloc,1)
+         CLC
+      ENDIF
+      EXIT
+   ENDIF
+   IF (AL = EXPANDED)
+      memaloc_expanded(BX)
+      IF (NC)
+         ; error in memory allocation
+         displayline(&errorinememaloc,1)
+         CLC
+      ENDIF
+      EXIT
+   ENDIF
+END
+IF (NC)
+   AX = 4C01H
+   INT 21H
+ENDIF
+BX = AX
+
+
+PUSH BX
+; grab the INT13
+AX = 3513H
+INT 21H
+normINT13.0.D = BX
+normINT13.2.D = ES
+PUSH DS
+DX = &myINT13
+AX = CS
+DS = AX
+AX = 2513H
+INT 21H
+POP DS
+
+POP BX ; first free para
+PUSH BX
+showinstalled(BX)
+check386()
+cacheoff = 0
+IF (disable = 1)
+   ; disable on start up
+   cacheoff = 1
+ENDIF
+AX = max_sptD
+IF (readahead >= AL)
+   readahead = 0
+   restoftrack = 1
+ENDIF
+
+;#IF DEBUG
+;LABEL testread
+;AX = CS
+;ES = AX
+;BX = &testsector
+;CX = 1
+;DL = 0
+;DH = 0
+;AX = 0201H
+;INT 13H
+;#ENDIF
+
+; TSR
+POP BX ; seg of end of our memory
+AX = BX
+AX += 10
+BX = pspD
+DX = AX - BX
+AX = 3100H
+INT 21H             ;terminate but stay resident.
+
+}
+;------------------------
+memaloc_conv (convfreesegD)
+WORD
+{
+SAVE BX,CX,DX
+
+; now intialise the CTs
+BX = convfreesegD
+AX = cachesegD
+ES = AX
+DI = 0 ; LRU CT
+ct_lruD = DI
+CX = number_ctsD
+SI = 0FFFFH
+DO
+   XOR AX,AX
+   ES.DI.CTlruD.D = SI
+   ES.DI.CTsegD.D = BX
+   ES.DI.CTfsector = AL
+   ES.DI.CTsectors = AL
+   ES.DI.CTlocked = AL
+   ES.DI.CTlastop = AL
+   SI = DI
+   DI += CACHETRACK
+   BX += ct_lengthinparasD
+   ES.SI.CTmruD.D = DI
+   LOOP
+   ES.SI.CTmruD.D = 0FFFFH
+   ct_mruD = SI
+END
+; BX has and of our memory
+AX = BX
+STC
+}
+;------------------------
+memaloc_extended (extfreesegD)
+WORD
+{
+SAVE BX,CX,DX
+
+; allocate the memory
+aloc_ext(requestedKD)
+IF (AX = 0)
+   ; error
+   CLC
+   RETURN
+ENDIF
+xmmhandleD = AX
+
+; CTsegD will have an half-kilobyte offset into the XMM block
+AX = ct_lengthD
+XOR DX,DX
+CX = 512
+DIV CX
+DX = AX ; number halfK blocks in one CT
+
+; now intialise the CTs
+AX = cachesegD
+ES = AX
+DI = 0 ; LRU CT
+ct_lruD = DI
+CX = number_ctsD
+SI = 0FFFFH
+BX = 0 ; offset into XMM block
+DO
+   ES.DI.CTlruD.D = SI
+   ES.DI.CTsegD.D = BX
+   XOR AX,AX
+   ES.DI.CTfsector = AL
+   ES.DI.CTsectors = AL
+   ES.DI.CTlocked = AL
+   ES.DI.CTlastop = AL
+   SI = DI
+   DI += CACHETRACK
+   ES.SI.CTmruD.D = DI
+   BX += DX ; next CT in halfK blocks
+   LOOP
+   ES.SI.CTmruD.D = 0FFFFH
+   ct_mruD = SI
+END
+AX = extfreesegD
+STC
+}
+;------------------------
+memaloc_expanded (expfreesegD)
+WORD
+{
+SAVE BX,CX,DX
+
+; allocate the memory
+aloc_exp(requestedKD)
+IF (AX = 0)
+   ; error
+   CLC
+   RETURN
+ENDIF
+emmhandleD = AX
+
+; CTsegD will have an half-kilobyte offset into the EMM block
+AX = ct_lengthD
+XOR DX,DX
+CX = 512
+DIV CX
+DX = AX ; number halfK blocks in one CT
+
+; now intialise the CTs
+AX = cachesegD
+ES = AX
+DI = 0 ; LRU CT
+ct_lruD = DI
+CX = number_ctsD
+SI = 0FFFFH
+BX = 0 ; offset into XMM block
+DO
+   ES.DI.CTlruD.D = SI
+   ES.DI.CTsegD.D = BX
+   XOR AX,AX
+   ES.DI.CTfsector = AL
+   ES.DI.CTsectors = AL
+   ES.DI.CTlocked = AL
+   ES.DI.CTlastop = AL
+   SI = DI
+   DI += CACHETRACK
+   ES.SI.CTmruD.D = DI
+   BX += DX ; next CT in halfK blocks
+   LOOP
+   ES.SI.CTmruD.D = 0FFFFH
+   ct_mruD = SI
+END
+AX = expfreesegD
+STC
+}
+;------------------------
+aloc_exp(alockD)
+WORD
+{
+; allocate memory from EMM and return handle in AX with C
+; else NC
+SAVE BX,CX,DX,SI,DI,ES
+AX = alockD ; in K
+CX = 16
+XOR DX,DX
+DIV CX
+IF (DX <> 0)
+   AX++
+ENDIF
+BX = AX ; in 16K pages
+AH = 43H
+INT 67H
+IF (AH = 0)
+   AX = DX
+   STC
+ELSE
+   XOR AX,AX
+   CLC
+ENDIF
+
+}
+;------------------------
+aloc_ext(alockD)
+WORD
+{
+; allocate memory and return handle in AX
+; and C else NC
+SAVE BX,CX,DX,SI,DI,ES
+DX = alockD ; K we require
+AH = 9
+AL = 0
+CALL DWORD PTR xms
+IF (AX = 1)
+   AX = DX
+   STC
+ELSE
+   XOR AX,AX
+   CLC
+ENDIF
+}
+;------------------------
+aloc_umb(alockD)
+WORD
+{
+; allocate UMB block and return segment in AX and C
+; else NC and if no umbs AX =0FFFFH, or AX = avail paras
+SAVE BX,CX,DX,SI,DI,ES
+; size in paras
+; ax has number paras
+SI = alockD
+
+AX = 5802H
+INT 21H
+linkflag = AL
+AX = 5800H
+INT 21H
+strategyD = AX
+XOR DI,DI
+DO
+   AX = 5803H
+   BX = 1
+   INT 21H
+   EXIT (C)
+   AX = 5801H
+   BX = 40H
+   INT 21H
+   EXIT (C)
+   DI++
+   AX = 4800H
+   BX = SI
+   INT 21H
+   EXIT (NC)
+   AX = BX
+END
+PUSHF
+PUSH AX
+AX = 5803H
+BL = linkflag
+BH = 0
+INT 21H
+BX = strategyD
+AX = 5801H
+INT 21H
+
+IF (DI = 0)
+   POP AX
+   POPF
+   AX = 0FFFFH
+   CLC
+ELSE
+   POP AX
+   POPF
+   CMC
+ENDIF
+
+}
+;------------------------
+check_memory ()
+{
+; check the memory type
+DO
+   IFL (memorytype = EXTENDED || memorytype = 0)
+      ; see if XMM exists
+      AX = 4300H
+      INT 2FH
+      IF (AL = 80H)
+         ; exists
+         ; get XMS
+         AX = 4310H
+         INT 2FH
+         xms.0.D = BX
+         xms.2.D = ES
+         ; see how much exists
+         AH = 08H
+         CALL DWORD PTR xms
+         ; dx has free X in K, ax has largest available block
+         BX = AX
+         IF (requestedKD = 0)
+            SHR BX,1
+         ENDIF
+         IF (BX >= requestedKD && BX >= 64)
+            ; we will use Xmem
+            memorytype = EXTENDED
+            IF (requestedKD = 0)
+               requestedKD = BX
+            ENDIF
+            EXITL
+         ENDIF
+         ; insuf mem
+         IF (memorytype = EXTENDED)
+            IF (BX >= 64)
+               requestedKD = BX
+               memorytype = EXTENDED
+               EXITL
+            ENDIF
+            displayline(&insufmem,1)
+            CLC
+            RETURN
+         ENDIF
+         ; try others
+      ENDIF
+      IF (memorytype = EXTENDED)
+         displayline(&xmmnotexist,1)
+         CLC
+         RETURN
+      ENDIF
+   ENDIF
+   IFL (memorytype = EXPANDED || memorytype = 0)
+      ; see if EMM exists and status and version
+      checkemm() ; rets AL: (0 - not exists,1 - not ready,2 - wrong version)
+      IF (C)
+         ; exists
+         ; get page segment
+         AH = 41H
+         INT 67H
+         emmsegD = BX
+         ; see how much exists
+         AH = 42H
+         INT 67H
+         ; bx has free 16K pages
+         AX = BX
+         CX = 16
+         MUL CX
+         BX = AX
+         IF (requestedKD = 0)
+            SHR BX,1
+         ENDIF
+         IF (BX >= requestedKD && BX >= 64)
+            ; we will use Emem
+            memorytype = EXPANDED
+            IF (requestedKD = 0)
+               requestedKD = BX
+            ENDIF
+            EXITL
+         ENDIF
+         ; insuf mem
+         IF (memorytype = EXPANDED)
+            IF (BX >= 64)
+               requestedKD = BX
+               memorytype = EXPANDED
+               EXITL
+            ENDIF
+            displayline(&insufmem,1)
+            CLC
+            RETURN
+         ENDIF
+         ; try others
+      ENDIF
+      IF (memorytype = EXPANDED)
+         IF (AL = 2)
+            displayline(&emmwrong,1)
+         ELSE
+            displayline(&emmnotexist,1)
+         ENDIF
+         CLC
+         RETURN
+      ENDIF
+   ENDIF
+   IF (memorytype = CONVENTIONAL || memorytype = 0)
+      ; See how much memory we have
+      memorytype = CONVENTIONAL
+      AX = pspD
+      ES = AX
+      BX = ES.2.D ; last segment of memory
+      BX -= pspD
+      ; minus the amount of code we have
+;      AX = &endofcode
+      AX = &init_data
+      AX += 15
+      CX = 16
+      XOR DX,DX
+      DIV CX
+      ; paras of code
+      CX = CS
+      AX += CX
+      AX -= pspD
+      BX -= AX
+      ; bx = number paragraphs available
+      ; minus 64K for dos and 9K for our temporary track
+      BX -= 4672
+      IF (requestedKD = 0)
+         SHR BX,1 ; take a half
+      ENDIF
+      ; convert to K
+      AX = BX
+      XOR DX,DX
+      CX = 64
+      DIV CX
+      BX = AX
+      IF (BX >= requestedKD && BX >= 64)
+         IF (requestedKD = 0)
+            requestedKD = BX
+         ENDIF
+         EXIT
+      ENDIF
+      ; insufficent memory
+      IF (BX < 64) ; 64K in paras
+         displayline(&insufmem,1)
+         CLC
+         RETURN
+      ENDIF
+      ; take it all
+      requestedKD = BX;
+   ENDIF
+END
+; the memory we will use is in memorytype
+STC
+}
+;------------------------
+checkemm ()
+{
+; Check for EMM and return C if all ok
+; else NC and AL: (0-not exists, 1-bad status, 2-wrong version)
+SAVE CX,SI,DI,ES
+
+XOR AX,AX
+ES = AX
+DI = 019CH ; int 67h
+AX = ES.DI.2.D
+ES = AX
+DI = 10
+SI = &emmname
+CX = 8
+CLD
+REPZ CMPSB
+IF (NZ)
+   AL = 0
+   CLC
+   RETURN
+ENDIF
+; check status
+AH = 40H
+INT 67H
+IF (AH <> 0)
+   AL = 1
+   CLC
+   RETURN
+ENDIF
+; check version
+AH = 46H
+INT 67H
+IF (AH <> 0 || AL < 32H)
+   AL = 2
+   CLC
+   RETURN
+ENDIF
+STC
+}
+;------------------------
+check386()
+{
+; checks if the processor is a 386 and
+; set the is386 flag accordingly
+
+SAVE AX,BX,CX
+
+PUSHF ; save flags
+POP AX ; put into ax
+BX = AX ; save
+AND BX,4000H ; zero all but bit 14
+XOR AX,4000H ; toggle NT bit (bit 14)
+PUSH AX ; push new value
+POPF ; into flags
+PUSHF ; push flags
+POP AX ; into ax
+CX = AX ; get value
+AND CX,4000H ; toggle all but bit 14
+XOR AX,4000H ; toggle bit 14
+PUSH AX ; push new value
+POPF ; into flags
+AL = 1 ; assume 386
+IF (BX = CX)
+   ; not a 386
+   AL = 0
+ENDIF
+is386 = AL
+}
+;------------------------
+build_drive_table()
+{
+
+; the BIOS call INT 13 (8):
+;
+;  Call:
+;   AH = 8
+;   DL = drive
+;
+;  Returns:
+;   AH = 0 or error code
+;   AL = 0
+;   BH = 0
+;   BL = drive type (0=none,1=no change,2=change,3=hard)
+;   CH = low 8 bits of max tracks
+;   CL = (0-5) max spt
+;        (6-7) track
+;   DH = max heads
+;   DL = number drives installed
+;   ES:DI points to floppy DBT
+
+; now get the maximum possible bps and cpt
+; use the INT13 (8) call to get info on drives
+AH = 8
+DL = 0
+INT 13H
+CL = ES.DI.3
+AX = 128
+SHL AX,CL
+max_bpsD = AX
+AL = ES.DI.4
+AH = 0
+max_sptD = AX
+;
+; now try the hard disk
+; first see if it exists
+AH = 8
+DL = 80H
+INT 13H
+IF (NC)
+   CL = ES.DI.3
+   AX = 128
+   SHL AX,CL
+   IF (AX > max_bpsD)
+      max_bpsD = AX
+   ENDIF
+   AL = ES.DI.4
+   AH = 0
+   IF (AX > max_sptD)
+      max_sptD = AX
+   ENDIF
+ENDIF
+
+; clear the drivetable
+DI = &drivetable
+SI = DI
+CX = DRIVEDEF*4
+PUSH DS
+POP ES
+XOR AX,AX
+STOS BIR
+
+; examine the four drives
+CL = 0
+REPEAT
+   IF (CL = 0 && drive = 0)
+      ; for a floppy we must set the spt and bps on reading the 1st sector
+      SI.DRVid = 0H
+      SI.DRVtype = 2
+      SI.DRVspt = 8 ; for 5 1/4 floppys
+      SI.DRVheads = 2
+      AX = max_bpsD
+      SI.DRVbpsD.D = AX
+   ENDIF
+   IF (CL = 1 && drive = 1)
+      ; for a floppy we must set the spt and bps on reading the 1st sector
+      SI.DRVid = 01H
+      SI.DRVtype = 2
+      SI.DRVspt = 9
+      SI.DRVheads = 2
+      AX = max_bpsD
+      SI.DRVbpsD.D = AX
+   ENDIF
+   IF (CL = 2 && drive = 80H)
+      ; for a hard disk we must examine the boot sector
+      get_disk_info(drive) ; rets spt in AL and heads in AH
+      EXIT (NC)
+      SI.DRVspt = AL
+      SI.DRVheads = AH
+      SI.DRVid = 80H
+      SI.DRVtype = 3
+      AX = max_bpsD
+      SI.DRVbpsD.D = AX
+   ENDIF
+   IF (CL = 3 && drive = 81H)
+      ; for a hard disk we must examine the boot sector
+      get_disk_info(drive) ; rets spt in AL and heads in AH
+      EXIT (NC)
+      SI.DRVspt = AL
+      SI.DRVheads = AH
+      SI.DRVid = 81H
+      SI.DRVtype = 3
+      AX = max_bpsD
+      SI.DRVbpsD.D = AX
+   ENDIF
+   SI += DRIVEDEF
+   INC CL
+   IF (CL = 4)
+      STC
+      EXIT
+   ENDIF
+ENDREPL
+
+}
+;------------------------
+get_disk_info (gdrive)
+BYTE
+{
+; load up the boot sector for the disk
+SAVE BX,CX,DX,DI,SI
+
+; see if we are to use huge partitions
+SI = 0
+IF (dosversionD >= 0400H)
+   ; calculate the size of the disk for BIGDOS
+   DL = dosdrive
+   DL++
+   AH = 36H
+   INT 21H
+   PUSH DX
+   MUL CX
+   POP CX
+   MUL CX
+   IF (DX >= 512)
+      SI = 1
+   ENDIF
+ENDIF
+
+DI = 3
+DO
+   IF (SI = 0)
+      CX = 1
+      DX = 0
+      BX = &bootsector
+   ELSE
+      CX = 0FFFFH
+      BX = &hugetable
+      XOR AX,AX
+      BX.0.D = AX
+      BX.2.D = AX
+      BX.4.D = 1
+      BX.6.D = &bootsector
+      AX = DS
+      BX.8.D = AX
+   ENDIF
+   AL = dosdrive
+   PUSH SI
+   PUSH DI
+   INT 25H
+   IF (C)
+      POPF
+      POP DI
+      POP SI
+      DI--
+      CONTINUE (DI <> 0)
+      XOR AX,AX
+      CLC
+      EXIT
+   ENDIF
+   POPF
+   POP DI
+   POP SI
+   ; read info
+   BX = &bootsector
+   CX = BX.1AH.D ; heads
+   AX = BX.18H.D ; spt
+   AH = CL
+   STC
+END
+
+}
+;------------------------
+show_measurements (cachesizeD,msegD,moffD,mtype)
+WORD
+WORD
+WORD
+BYTE
+{
+; display the measurement data
+
+JMP measurestart
+
+MESSAGE cachemeas = 'Cache measurements:'
+MESSAGE logtrans = '  Logical transfers  = '
+MESSAGE phytrans = '  Physical transfers = '
+MESSAGE savtrans = '  Transfers saved    = '
+MESSAGE persaved = '  Percentage saved   = '
+
+MESSAGE twospaces = '  '
+MESSAGE memorymeas = 'Memory measurements:'
+MESSAGE mcsize = 'K cache in '
+MESSAGE mcon = 'K conventional memory used'
+
+LABEL measurestart
+
+displayline(&cachemeas,1)
+;
+AX = msegD
+ES = AX
+DI = moffD
+;
+; translate the logical transfers
+displayline(&logtrans,0)
+SI = &dnumber
+AX = ES.DI.0.D
+DX = ES.DI.2.D
+dword2asc(SI,AX,DX)
+displayline(SI,1)
+;
+; translate the physical transfers
+displayline(&phytrans,0)
+SI = &dnumber
+AX = ES.DI.4.D
+DX = ES.DI.6.D
+dword2asc(SI,AX,DX)
+displayline(SI,1)
+;
+; translate the saved transfers
+displayline(&savtrans,0)
+SI = &dnumber
+; perform the subtraction
+AX = ES.DI.0.D
+DX = ES.DI.2.D
+CX = ES.DI.6.D
+AX -= ES.DI.4.D
+IF (C)
+   INC CX
+ENDIF
+DX -= CX
+IF (C)
+   XOR AX,AX
+   DX = AX
+ENDIF
+PUSH AX
+PUSH DX
+dword2asc(SI,AX,DX)
+displayline(SI,1)
+;
+; translate saved percent
+displayline(&persaved,0)
+POP DX ; number transfers saved * 100 / number logicals transfers
+POP AX
+calc_percent(DX,AX,ES.DI.2.D,ES.DI.0.D)
+; rets in AX
+SI = &dnumber
+SI++
+num2asc(SI,AX)
+SI--
+SI.0 = AL
+AH = 0
+PUSH SI
+INC SI
+SI += AX
+SI.0 = '%'
+SI.1 = 0
+POP SI
+SI.0 += 2
+displayline(SI,1)
+;
+;
+; now do the memory
+DI += 8
+displayNL()
+displayline(&memorymeas,1)
+displayline(&twospaces,0)
+; size of cache
+SI = &dnumber
+SI++
+num2asc(SI,cachesizeD)
+SI--
+SI.0 = AL
+displayline(SI,0)
+displayline(&mcsize,0)
+DO
+   IF (mtype = EXTENDED)
+      SI = &ext_t
+      EXIT
+   ENDIF
+   IF (mtype = EXPANDED)
+      SI = &exp_t
+      EXIT
+   ENDIF
+   SI = &con_t
+END
+displayline(SI,1)
+;
+; convention memory used?
+displayline(&twospaces,0)
+SI = &dnumber
+SI++
+AX = ES.DI.0.D
+num2asc(SI,AX)
+SI--
+SI.0 = AL
+displayline(SI,0)
+displayline(&mcon,1)
+;
+}
+;------------------------
+calc_percent (cp1D,cp2D,cp3D,cp4D)
+WORD
+WORD
+WORD
+WORD
+{
+; calculate percent: cp1:cp2 * 100 / cp2:cp4
+
+SAVE DI
+
+shld(6,cp1D,cp2D) ; * 64
+BX = AX
+CX = DX
+
+shld(5,cp1D,cp2D)
+BX += AX
+IF (C)
+   DX++
+ENDIF
+CX += DX
+
+shld(2,cp1D,cp2D)
+BX += AX
+IF (C)
+   DX++
+ENDIF
+CX += DX
+
+; dx:ax has *100
+doubleworddivide(CX,BX,cp3D,cp4D)
+
+; has percentage in AX
+}
+;------------------------
+shld (splaces,sd1D,sd2D)
+BYTE
+WORD
+WORD
+{
+; shift the double word in sd1:sd2 by splaces
+PUSH CX
+
+AX = sd2D
+DX = sd1D
+CL = splaces
+CH = 0
+DO
+   EXIT (CL = 0)
+   SHL AX,1
+   PUSHF
+   SHL DX,1
+   POPF
+   IF (C)
+      OR DX,1
+   ENDIF
+   LOOP
+END
+POP CX
+}
+;------------------------
+doubleworddivide(valhD,vallD,byhD,bylD)
+WORD
+WORD
+WORD
+WORD
+{
+SAVE BX,CX,DX,DI,SI
+
+BX = valhD
+CX = vallD
+DX = byhD
+AX = bylD
+
+DO
+   IF (DX > BX || (DX = BX && AX > CX))
+      AX = 0
+      EXIT
+   ENDIF
+   IF (BX = 0 && CX = 0)
+      AX = 0
+      EXIT
+   ENDIF
+   IF (DX = BX && AX = CX)
+      AX = 1
+      EXIT
+   ENDIF
+
+   DI = 0 ; counter
+   REPEAT
+      CX -= AX
+      IF (C)
+         SUB BX,1
+         IF (C) ; possiblility of rounding
+            CX += AX
+            SHR CX,1
+            IF (CX >= AX)
+               DI++
+            ENDIF
+            EXIT
+         ENDIF
+      ENDIF
+      BX -= DX
+      IF (C)
+         BX += DX
+         TEST CX,8000H ; is top bit set (negative)
+         IF (NZ)
+            BX++
+         ENDIF
+         IF (BX = DX)
+            SHR CX,1
+            IF (CX >= AX)
+               DI++
+            ENDIF
+         ENDIF
+         EXIT
+      ENDIF
+      DI++
+   ENDREP
+   AX = DI
+END
+}
+;-------------------------
+showinstalled (ffparaD)
+WORD
+{
+
+; where is cache
+displayline(&cacheisin,0)
+AL = memorytype
+DO
+   IF (AL = CONVENTIONAL)
+      BX = &con_t
+      EXIT
+   ENDIF
+   IF (AL = EXTENDED)
+      BX = &ext_t
+      EXIT
+   ENDIF
+   IF (AL = EXPANDED)
+      BX = &exp_t
+      EXIT
+   ENDIF
+END
+displayline(BX,1)
+displayNL()
+
+; work out how much memory we have used
+displayline(&codeused,0)
+AX = ffparaD
+AX -= pspD
+CX = 64
+XOR DX,DX
+DIV CX
+; ax has mem in K
+IF (DX <> 0)
+   AX++
+ENDIF
+DX = AX
+convusedD = AX
+SI = &dnumber
+SI++
+num2asc(SI,DX)
+SI--
+SI.0 = AL
+displayline(SI,0)
+displayline(&ink,1)
+
+; see how much cache there is
+displayline(&mcacheused,0)
+AX = max_bpsD
+CX = max_sptD
+MUL CX
+CX = number_ctsD
+MUL CX
+CX = 1024
+DIV CX
+; ax has K of cache
+requestedKD = AX
+DX = AX
+SI = &dnumber
+SI++
+num2asc(SI,DX)
+SI--
+SI.0 = AL
+displayline(SI,0)
+displayline(&ink,1)
+displayNL()
+
+displayline(&instld,0)
+IF (disable = 1)
+   ; but we are disabled
+   displayline(&butdisabled,0)
+ENDIF
+displayNL()
+
+}
+;------------------------
+dword2asc(dastrD,lowD,highD)
+WORD
+WORD
+WORD
+{
+; do in two parts of 10,000
+SAVE BX,CX,DX,SI
+
+BX = lowD
+DX = highD
+SI = dastrD
+SI.0 = 0
+PUSH SI
+SI++
+CX = 10000
+IF (DX <> 0 || BX >= CX)
+   AX = BX
+   DIV CX
+   PUSH DX
+   num2asc(SI,AX)
+   SI--
+   SI.0 = AL + 4
+   SI++
+   SI += AX
+   PUSH SI
+   CX = 5 - AX
+   DO
+      SI.0 = '0'
+      SI++
+      LOOP
+   END
+   POP SI
+   POP BX
+   XOR DX,DX
+   DO
+      IF (BX = 0 || BX < 10)
+         SI += 3
+         EXIT
+      ENDIF
+      IF (BX < 100)
+         SI += 2
+         EXIT
+      ENDIF
+      IF (BX < 1000)
+         SI++
+         EXIT
+      ENDIF
+   END
+ENDIF
+
+num2asc(SI,BX)
+POP SI
+IF (SI.0 = 0)
+   SI.0 = AL
+ENDIF
+AL = SI.0
+AH = 0
+
+}
+;------------------------
+num2asc(nastrD,navalD)
+WORD
+WORD
+{
+; convert the word in navalD into an ASCIIZ string starting at nastrD
+; returns length in AX
+PUSH BX
+PUSH CX
+PUSH DX
+PUSH SI
+PUSH DI
+DI = nastrD
+AX = navalD
+CX = 10
+XOR BX,BX
+REPEAT
+   EXIT (AX = 0)
+   XOR DX,DX
+   DIV CX
+   ; char is in DL
+   DL += 48
+   DI.0 = DL
+   DI++
+   BX++
+ENDREP
+; length is in BX
+IF (BX = 0)
+   DI.0 = '0'
+   DI++
+   BX++
+ENDIF
+PUSH BX
+DI.0 = 0
+CX = BX
+SHR BX,1
+IF (C)
+   CX--
+ENDIF
+SHR CX,1
+DI--
+SI = nastrD
+DO
+   EXIT (CX = 0)
+   AL = SI.0
+   AH = DI.0
+   SI.0 = AH
+   DI.0 = AL
+   SI++
+   DI--
+   LOOP
+END
+POP AX
+POP DI
+POP SI
+POP DX
+POP CX
+POP BX
+}
+;------------------------
+parseparameter(para)
+BYTE
+{
+AL = para
+DO
+   EXITL (installed = 1)
+   IF (AL = '?')
+      uninstalledhelp()
+   ENDIF
+   IF (AL = 'X')
+      memorytype = EXTENDED
+      EXITL
+   ENDIF
+   IF (AL = 'E')
+      memorytype = EXPANDED
+      EXITL
+   ENDIF
+   IF (AL = 'C')
+      memorytype = CONVENTIONAL
+      EXIT
+   ENDIF
+   IF (AL = 'D')
+      disable = 1
+      EXIT
+   ENDIF
+   IF (AL = 'H')
+      hitindicator = 1
+      EXIT
+   ENDIF
+   IF (AL = 'A')
+      allowredundant = 1
+      EXIT
+   ENDIF
+   IF (AL = 'M')
+      minimise = 1
+   ENDIF
+   IF (AL = 'R')
+      readpriority = 1
+      EXIT
+   ENDIF
+   IF (AL = 'T')
+      AL = ES.SI.0
+      SI++
+      IF (AL = ':')
+         ; point to number
+         cl_asc2num()
+         ; DX has value, AL has last char
+         readahead = DL
+         restoftrack = 0
+         SI--
+         EXIT
+      ENDIF
+   ENDIF
+   IF (AL = 'U')
+      uninstall = 1
+      EXIT
+   ENDIF
+   #IF DVERSION
+   IF (AL = 'W')
+      allowwrite = 1
+      EXIT
+   ENDIF
+   #ENDIF
+   CLC
+   RETURN
+END
+DO
+   EXIT (installed = 0)
+   IF (AL = '?')
+      installedhelp()
+   ENDIF
+   IF (AL = 'D')
+      disable = 1
+      EXIT
+   ENDIF
+   IF (AL = 'E')
+      disable = 2 ; enable
+      EXIT
+   ENDIF
+   IF (AL = 'F')
+      rflush = 1
+      EXIT
+   ENDIF
+   IF (AL = 'O')
+      showparas = 1
+      EXIT
+   ENDIF
+   IF (AL = 'M')
+      showmeasures = 1
+      EXIT
+   ENDIF
+   IF (AL = 'U')
+      uninstall = 1
+      EXIT
+   ENDIF
+   #IF DEBUG
+   IF (AL = 'I')
+      displaycache = 1
+      EXIT
+   ENDIF
+   #ENDIF
+   CLC
+   RETURN
+END
+STC
+}
+;-------------------------
+displayline (dlineD,dnl)
+WORD
+BYTE
+{
+SAVE BX,CX
+BX = dlineD
+CL = BX.0
+CH = 0
+BX++
+DO
+   EXIT (CL = 0)
+   AL = BX.0
+   BX++
+   EXIT (AL = 0)
+   displaychar(AL)
+   LOOP
+END
+IF (dnl = 1)
+   displayNL()
+ENDIF
+}
+;------------------------
+displaychar (dchar)
+BYTE
+{
+PUSH BX
+AH = 0EH
+AL = dchar
+INT 10H
+POP BX
+}
+;------------------------
+displayNL ()
+{
+displaychar(10)
+displaychar(13)
+}
+;------------------------
+uppercase ()
+{
+IF (AL >= 'a' && AL <= 'z')
+   AL -= 'a'
+   AL += 'A'
+ENDIF
+}
+;------------------------
+cl_asc2num ()
+{
+; convert ascii to number of command line
+; return in DX, last char in AL
+
+SAVE BX,CX
+
+BX = 0
+CX = 10
+REPEAT
+   AL = ES.SI.0
+   SI++
+   EXIT (AL = 32 || AL = 13)
+   PUSH AX
+   AX = BX
+   MUL CX
+   BX = AX
+   POP AX
+   AL -= '0'
+   AH = 0
+   BX += AX
+ENDREP
+DX = BX
+}
+;------------------------
+getdisplaytype()
+{
+;find out what kind of display adaptor is being used
+AH = 15 ;get video mode
+INT 10H
+IF (AL = 7) ;monochrome adapter mode
+   AX = 0B000H
+ELSE
+   AX = 0B800H
+ENDIF
+displayparaD = AX
+}
+;------------------------
+show_parameters(psegD,poffD,mtype)
+WORD
+WORD
+BYTE
+{
+JMP sp_start
+
+MESSAGE sp1 = 'Current options are:'
+MESSAGE spa = '  Allow redundant writes:       '
+MESSAGE sph = '  Hit indicator:                '
+MESSAGE spm = '  Minimise conventional memory: '
+MESSAGE spr = '  Read has priority over write: '
+MESSAGE spt = '  Read-ahead sectors in track:  '
+#IF DVERSION
+MESSAGE spw = '  Allow writes (DEBUG version): '
+#ENDIF
+
+MESSAGE off = 'OFF'
+MESSAGE on = 'ON'
+MESSAGE all = 'ALL'
+
+LABEL sp_start
+
+AX = psegD
+ES = AX
+DI = poffD
+; ES:DI point to:
+;allowredundant
+;hitindicator
+;minimise
+;readpriority
+;restoftrack
+;readahead
+
+displayline(&sp1,1)
+;
+displayline(&spa,0)
+AL = ES.DI.0
+displayyesno(AL)
+;
+displayline(&sph,0)
+AL = ES.DI.1
+displayyesno(AL)
+;
+displayline(&spm,0)
+AL = ES.DI.2
+displayyesno(AL)
+;
+displayline(&spr,0)
+AL = ES.DI.3
+displayyesno(AL)
+;
+displayline(&spt,0)
+CH = ES.DI.4
+; restoftrack
+CL = ES.DI.5
+; readahead
+DO
+   IF (CH = 1)
+      displayline(&all,1)
+      EXIT
+   ENDIF
+   IF (CL = 0)
+      displayline(&off,1)
+      EXIT
+   ENDIF
+   BX = &dnumber
+   BX++
+   num2asc(BX,CX)
+   BX--
+   BX.0 = AL
+   displayline(BX,1)
+END
+;
+#IF DVERSION
+displayline(&spw,0)
+AL = ES.DI.6
+displayyesno(AL)
+#ENDIF
+;
+displayNL()
+displaychar(32)
+displaychar(32)
+displayline(&cacheisin,0)
+AL = mtype
+DO
+   IF (AL = EXTENDED)
+      BX = &ext_t
+      EXIT
+   ENDIF
+   IF (AL = EXPANDED)
+      BX = &exp_t
+      EXIT
+   ENDIF
+   BX = &con_t
+END
+displayline(BX,1)
+;
+}
+;------------------------
+displayyesno(yesno)
+BYTE
+{
+IF (yesno = 0)
+   displayline(&off,1)
+ELSE
+   displayline(&on,1)
+ENDIF
+}
+;------------------------
+uninstalledhelp()
+{
+JMP uninhelp
+
+MESSAGE uh1 = 'MI-CACHE has not been loaded. To load type MICACHE'
+MESSAGE uh2 = 'Usage: MICACHE drive: [size] [options]'
+MESSAGE uh3 = '  [size] is the size of the cache in kilobytes (KB)'
+MESSAGE uh4 = '  [options] are:'
+MESSAGE uhx = '    -X    Use extended memory for cache'
+MESSAGE uhe = '    -E    Use expanded memory for cache'
+MESSAGE uhc = '    -C    Use conventional memory for cache'
+MESSAGE uha = '    -A    Allow redundant writes'
+MESSAGE uhd = '    -D    Start up cache disabled'
+MESSAGE uhh = '    -H    Show cache HIT indicator'
+MESSAGE uhm = '    -M    Minimise use of conventional memory'
+MESSAGE uhr = '    -R    Give read priority over writes'
+MESSAGE uht = '    -T:nn Read nn sectors ahead in track (default is all)'
+MESSAGE uhq = '    -?    Display this help screen'
+#IF DVERSION
+MESSAGE uhw = '    -w    Allow writes to disk (DEBUG version only)'
+#ENDIF
+
+LABEL uninhelp
+displayline(&uh1,1)
+displayNL()
+displayline(&uh2,1)
+displayNL()
+displayline(&uh3,1)
+displayNL()
+displayline(&uh4,1)
+displayline(&uhx,1)
+displayline(&uhe,1)
+displayline(&uhc,1)
+displayNL()
+displayline(&uha,1)
+displayline(&uhd,1)
+displayline(&uhh,1)
+IF (dosversionD >= 0500H)
+   displayline(&uhm,1)
+ENDIF
+displayline(&uhr,1)
+displayline(&uht,1)
+displayNL()
+displayline(&uhq,1)
+#IF DVERSION
+displayline(&uhw,1)
+#ELSE
+displayNL()
+#ENDIF
+
+AX = 4C00H
+INT 21H
+}
+;------------------------
+installedhelp ()
+{
+JMP inhelp
+
+MESSAGE ih1 = 'MI-CACHE is loaded'
+MESSAGE ih2 = 'Usage: MICACHE [options]'
+MESSAGE ih3 = '  [Options] are:'
+
+MESSAGE ihd = '    -D    Disable caching'
+MESSAGE ihe = '    -E    Enable caching'
+MESSAGE ihf = '    -F    Flush cache'
+MESSAGE ihm = '    -M    Display measurements'
+MESSAGE iho = '    -O    Show options in use'
+MESSAGE ihu = '    -U    Unload MICACHE from memory'
+MESSAGE ihq = '    -?    Display this help screen'
+#IF DEBUG
+MESSAGE ihi = '    -I    Show cache info (DEBUG version)'
+#ENDIF
+
+LABEL inhelp
+
+displayline(&ih1,0)
+; get state of cache
+AX = 0FF00H
+CL = 'M'
+CH = 'I'
+DL = 0FFH
+INT 13H
+IF (AH = 1)
+   ; disabled
+   displayline(&butdisabled,0)
+ENDIF
+displayNL()
+displayNL()
+
+displayline(&ih2,1)
+displayNL()
+displayline(&ih3,1)
+displayline(&ihd,1)
+displayline(&ihe,1)
+displayline(&ihf,1)
+displayline(&ihm,1)
+displayline(&iho,1)
+displayline(&ihu,1)
+displayline(&ihq,1)
+#IF DEBUG
+displayline(&ihi,1)
+#ENDIF
+displayNL()
+
+
+AX = 4C00H
+INT 21H
+}
+;------------------------
+endofcode ()
+{
+}
+;------------------------
+TOPLVL D	éÄûÄÄÄÄÄæ8Q »∞∞  LàLˇ                                                                                                                                                            ¨&7      ÅÄOKI Laserline 6 Port      HÅÄÄ¿MICACHE.MIL(shortdate)P-NO
+ÄÄéÄûÄÄ;------------------------------------------------------------------------------------------	åÄöÄ˛ÄÄÄFÉÄ;------------------------------------------------------------------------------------------	éÄûÄÄÄÄÄ
