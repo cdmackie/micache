@@ -1643,6 +1643,10 @@ END
 IF (errorcode = 0)
    CLC
 ELSE
+   ; the failed read may have overwritten sectors the CT holds, so drop it
+   AX = cachesegD
+   ES = AX
+   clear_ct(ctoffD)
    STC
 ENDIF
 }
