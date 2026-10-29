@@ -2664,13 +2664,10 @@ SAVE AX,BX,DX,ES
 AL = memorytype
 DO
    EXIT (AL = CONVENTIONAL)
-   IF (AL = EXTENDED)
-      ; get state of A20 line
-      AH = 7
-      CALL DWORD PTR xms
-      a20state = AL
-      EXIT
-   ENDIF
+   ; for EXTENDED there is nothing to save: XMS move (0BH) leaves the A20
+   ; line as it found it, and 'restoring' it with the local enable/disable
+   ; calls unbalanced their count on every INT13
+   EXIT (AL = EXTENDED)
    IF (AL = EXPANDED)
       ; save page map
       AH = 47H
@@ -2687,15 +2684,7 @@ SAVE AX,BX,DX,ES
 AL = memorytype
 DO
    EXIT (AL = CONVENTIONAL)
-   IF (AL = EXTENDED)
-      ; restore A20 line
-      AH = 5 ; enable
-      IF (a20state = 0)
-         AH++ ; disable
-      ENDIF
-      CALL DWORD PTR xms
-      EXIT
-   ENDIF
+   EXIT (AL = EXTENDED) ; see savestate
    IF (AL = EXPANDED)
       ; restore page map
       AH = 48H
