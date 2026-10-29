@@ -3193,7 +3193,19 @@ DO
       ENDIF
       POP AX
    ENDIF
-   ; failed - use conv
+   ; failed - use conv, but not across a 64K boundary (see memaloc_conv)
+   PUSH AX
+   AX += BX
+   AX--
+   PUSH AX
+   XOR AX,BX
+   TEST AX,0F000H
+   POP AX
+   IF (NZ)
+      AND AX,0F000H
+      BX = AX
+   ENDIF
+   POP AX
    tracksegD = BX
    BX += AX
 END
@@ -3305,14 +3317,38 @@ WORD
 SAVE BX,CX,DX
 
 ; now intialise the CTs
+; A CT must not cross a 64K boundary, as the BIOS cant DMA across one
+; (a floppy read into it would always fail with error 9), so we skip
+; over the boundaries, keeping within the memory for number_ctsD CTs
+; and having fewer CTs if need be.
 BX = convfreesegD
+AX = number_ctsD
+MUL ct_lengthinparasD
+AX += BX
+DX = AX ; end of the memory for the CTs
 AX = cachesegD
 ES = AX
 DI = 0 ; LRU CT
 ct_lruD = DI
-CX = number_ctsD
+CX = 0 ; CTs made
 SI = 0FFFFH
-DO
+REPEAT
+   AX = BX
+   AX += ct_lengthinparasD
+   AX-- ; last para of CT
+   PUSH AX
+   XOR AX,BX
+   TEST AX,0F000H
+   POP AX
+   IF (NZ)
+      ; crosses a 64K boundary, so start the CT on it
+      AND AX,0F000H
+      BX = AX
+   ENDIF
+   AX = BX
+   AX += ct_lengthinparasD
+   EXIT (AX > DX) ; no room
+   PUSH AX
    XOR AX,AX
    ES.DI.CTlruD.D = SI
    ES.DI.CTsegD.D = BX
@@ -3320,14 +3356,16 @@ DO
    ES.DI.CTsectors = AL
    ES.DI.CTlocked = AL
    ES.DI.CTlastop = AL
+   POP BX ; end of this CT
    SI = DI
    DI += CACHETRACK
-   BX += ct_lengthinparasD
    ES.SI.CTmruD.D = DI
-   LOOP
-   ES.SI.CTmruD.D = 0FFFFH
-   ct_mruD = SI
-END
+   CX++
+   EXIT (CX = number_ctsD)
+ENDREP
+ES.SI.CTmruD.D = 0FFFFH
+ct_mruD = SI
+number_ctsD = CX
 ; BX has and of our memory
 AX = BX
 STC
