@@ -846,7 +846,14 @@ DO
    STI
    RET 2
 END
-; other operation which we are not concerned with
+; other operation which we are not concerned with, but if it changes
+; what is on the disk (format, write long, extended write) then what we
+; hold for the drive is stale, so forget it
+IF (AH = 5 || AH = 6 || AH = 7 || AH = 0BH || AH = 43H)
+   pushall()
+   flush_cache(DL)
+   popall()
+ENDIF
 #IF DEBUG ;===
 pushall()
 BX = &gnum
