@@ -1403,8 +1403,9 @@ REPEAT
             SI = 1
             EXITL
          ENDIF
-         ; demote
-         demote_ct(DI)
+         ; invalidate it: just demoting it so that it gets reused left
+         ; the old sectors in a locked CT, which is never reused
+         clear_ct(DI)
          EXITL
       ENDIF
       ;
