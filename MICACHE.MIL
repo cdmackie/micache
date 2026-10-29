@@ -3122,6 +3122,21 @@ MUL CX
 CX = ct_lengthD
 DIV CX
 ; in AX
+; the descriptors are cleared and set up over the 16K bootsector buffer
+; while we are still initialising, so we can have no more than will fit
+; in it (with room to spare), else they overwrite init's stack and code
+IF (AX > 1000)
+   AX = 1000
+   ; and only ask for the memory we will use
+   PUSH AX
+   MUL ct_lengthD
+   ADD AX,1023
+   ADC DX,0
+   CX = 1024
+   DIV CX
+   requestedKD = AX
+   POP AX
+ENDIF
 number_ctsD = AX
 
 ; first we should try and allocate UMBs for the cache descriptors
