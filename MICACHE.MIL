@@ -1750,30 +1750,7 @@ DO
    ENDIF
    IF (AL = EXPANDED)
       ; map expanded pages into EMM seg
-      ; find which LP the CT starts in
-      AX = ctsegD ; 512 byte page
-      CX = 512
-      MUL CX
-      CX = 16384 ; 16K
-      DIV CX
-      ; LPn is in AX, offset in DX
-      ; map LPn,n+1 into PP0,1 as the CT will not be bigger than 32K
-      PUSH DX ; save offset
-      DX = emmhandleD
-      BX = AX
-      PUSH BX
-      AX = 4400H
-      INT 67H
-      POP BX
-      BX++
-      AX = 4401H
-      INT 67H
-      ; CT is now in emmsegD:offset
-      POP AX ; offset
-      CX = 16
-      XOR DX,DX
-      DIV CX
-      AX += emmsegD
+      map_ems_ct(ctsegD)
       ; segment is in AX
       DX = AX
       ; start of CT is at ES:0
@@ -2041,30 +2018,7 @@ DO
    ENDIF
    IF (AL = EXPANDED)
       ; map required page into emmsegD
-      ; find which LP the CT starts in
-      AX = ctsegD ; 512 byte page
-      CX = 512
-      MUL CX
-      CX = 16384 ; 16K
-      DIV CX
-      ; LPn is in AX, offset in DX
-      ; map LPn,n+1 into PP0,1 as the CT will not be bigger than 32K
-      PUSH DX ; save offset
-      DX = emmhandleD
-      BX = AX
-      PUSH BX
-      AX = 4400H
-      INT 67H
-      POP BX
-      BX++
-      AX = 4401H
-      INT 67H
-      ; CT is now in emmsegD:offset
-      POP AX ; offset
-      CX = 16
-      XOR DX,DX
-      DIV CX
-      AX += emmsegD
+      map_ems_ct(ctsegD)
       ; segment is in AX
       ES = AX
       ; start of CT is at ES:0
@@ -2088,6 +2042,48 @@ DO
       EXIT
    ENDIF
 END
+}
+;------------------------
+map_ems_ct (mctsegD)
+WORD
+{
+; map the CT at half-K offset mctsegD into the EMM page frame and return
+; the segment of its start in AX. A CT can be up to 32K and start part way
+; into a 16K page, so it can span three pages: map all that it needs
+SAVE BX,CX,DX
+; find which LP the CT starts in
+AX = mctsegD ; 512 byte page
+CX = 512
+MUL CX
+CX = 16384 ; 16K
+DIV CX
+; LPn is in AX, offset in DX
+PUSH DX ; save offset
+BX = AX
+AX = DX
+AX += ct_lengthD
+AX--
+XOR DX,DX
+DIV CX
+CX = AX
+CX++ ; number of pages the CT spans
+AL = 0 ; PP0
+DX = emmhandleD
+DO
+   PUSH AX
+   AH = 44H
+   INT 67H
+   POP AX
+   AL++
+   BX++
+   LOOP
+END
+; CT is now in emmsegD:offset
+POP AX ; offset
+CX = 16
+XOR DX,DX
+DIV CX
+AX += emmsegD
 }
 ;------------------------
 int13read (i13segD,i13offD,i13drive,i13head,i13trackD,i13fsec,i13secs)
