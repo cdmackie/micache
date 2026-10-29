@@ -3707,22 +3707,13 @@ AL = ES.DI.4
 AH = 0
 max_sptD = AX
 ;
-; now try the hard disk
-; first see if it exists
-AH = 8
-DL = 80H
-INT 13H
-IF (NC)
-   CL = ES.DI.3
-   AX = 128
-   SHL AX,CL
-   IF (AX > max_bpsD)
-      max_bpsD = AX
-   ENDIF
-   AL = ES.DI.4
-   AH = 0
-   IF (AX > max_sptD)
-      max_sptD = AX
+; a hard disk has 512 byte sectors, and its spt is added to max_sptD
+; when we examine it below (INT13 (8) returns no DBT in ES:DI for a hard
+; disk, so the old code here just re-read the floppy DBT and a hard disk
+; with more spt than the floppy overran its CT)
+IF (drive >= 80H)
+   IF (max_bpsD < 512)
+      max_bpsD = 512
    ENDIF
 ENDIF
 
@@ -3760,6 +3751,7 @@ REPEAT
       ; for a hard disk we must examine the boot sector
       get_disk_info(drive) ; rets spt in AL and heads in AH
       EXIT (NC)
+      update_max_spt()
       SI.DRVspt = AL
       SI.DRVheads = AH
       SI.DRVid = 80H
@@ -3771,6 +3763,7 @@ REPEAT
       ; for a hard disk we must examine the boot sector
       get_disk_info(drive) ; rets spt in AL and heads in AH
       EXIT (NC)
+      update_max_spt()
       SI.DRVspt = AL
       SI.DRVheads = AH
       SI.DRVid = 81H
@@ -3845,14 +3838,37 @@ DO
    POPF
    POP DI
    POP SI
-   ; read info
-   BX = &bootsector
-   CX = BX.1AH.D ; heads
-   AX = BX.18H.D ; spt
-   AH = CL
+   ; the drive is there, now get its geometry from the BIOS: we split
+   ; INT13 requests into tracks with it, so it must be the BIOS's
+   ; geometry for this BIOS drive, not what the BPB says
+   PUSH ES
+   AH = 8
+   DL = gdrive
+   INT 13H
+   POP ES
+   IF (C)
+      XOR AX,AX
+      CLC
+      EXIT
+   ENDIF
+   AL = CL
+   AND AL,00111111B ; spt
+   AH = DH
+   AH++ ; heads
    STC
 END
 
+}
+;------------------------
+update_max_spt ()
+{
+; make sure a CT can hold a track of AL sectors
+PUSH AX
+AH = 0
+IF (AX > max_sptD)
+   max_sptD = AX
+ENDIF
+POP AX
 }
 ;------------------------
 show_measurements (cachesizeD,msegD,moffD,mtype)
