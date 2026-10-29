@@ -1,0 +1,6 @@
+@echo off
+PATH C:\DOS
+VER > C:\R.LOG
+MEM >> C:\R.LOG
+QBASIC /RUN C:\T.BAS
+POWEROFF

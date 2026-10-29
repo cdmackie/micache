@@ -1,1 +1,5 @@
 out/
+test/work/
+test/iso/
+test/dist/
+test/data/
