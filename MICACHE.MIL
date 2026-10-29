@@ -1950,7 +1950,10 @@ IFL (errorcode = 0)
    promote_ct(DI)
    CLC
 ELSE
-   ; invalidate the CT
+   ; invalidate the CT, as the failed read may have overwritten its data
+   ; (ES is the CT data here, not the descriptors)
+   AX = cachesegD
+   ES = AX
    ES.DI.CTfsector = 0
    STC
 ENDIF
