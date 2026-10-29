@@ -519,7 +519,16 @@ DO
       PUSH AX
       testdrive(DL)
       POP AX
-      EXIT (C) ; drive ok
+      IF (C) ; drive ok
+         ; but we can only split a request into tracks once we know the
+         ; geometry, which for a floppy comes from its boot sector, so
+         ; until then the only request we take is a read of that sector
+         PUSH AX
+         geometryknown(DL)
+         POP AX
+         EXIT (C)
+         EXIT (AH = 2 && AL = 1 && CX = 1 && DH = 0)
+      ENDIF
    ENDIF
    ; call the old BIOS
    POP DS
@@ -1892,18 +1901,13 @@ IFL (errorcode = 0)
    ; special code to deal with the floppy disks
    ; if this is the first read of the boot sector, then we must
    ; extract bps and spt
-   IF (CL = 1 && BX = 0 && DH = 0 && (DL = 0 || DL = 1))
+   IFL (CL = 1 && BX = 0 && DH = 0 && (DL = 0 || DL = 1))
       ; boot sector of a floppy drive
       #IF DEBUG
       debugline(&floppy,0)
       #ENDIF
-      ES.DI.CTlocked = 1
       PUSH ES
-      IF (DL = 0)
-         floppy0ok = 1
-      ELSE
-         floppy1ok = 1
-      ENDIF
+      PUSH DX
       SI = &drivetable
       AL = DL
       AH = 0
@@ -1920,12 +1924,27 @@ IFL (errorcode = 0)
          ES = AX
       ENDIF
       AX = ES.0BH.D ; bps
-      SI.DRVbpsD.D = AX
-      disk_bpsD = AX
-      AX = ES.18H.D
-      SI.DRVspt = AL
-      disk_spt = AL
+      CX = ES.18H.D ; spt
+      POP DX
       POP ES
+      ; only trust a sensible BPB (a zero spt would divide by zero, and a
+      ; track bigger than a CT would overrun it); otherwise the geometry
+      ; stays unknown and the drive is passed straight to the BIOS
+      IF (AX = max_bpsD && CL <> 0 && CX <= max_sptD)
+         ES.DI.CTlocked = 1
+         SI.DRVbpsD.D = AX
+         disk_bpsD = AX
+         SI.DRVspt = CL
+         disk_spt = CL
+         IF (DL = 0)
+            floppy0ok = 1
+         ELSE
+            floppy1ok = 1
+         ENDIF
+      ELSE
+         ; we cant tell what we have read, so dont keep it
+         ES.DI.CTfsector = 0
+      ENDIF
    ENDIF
    POP BX
    promote_ct(DI)
@@ -2432,6 +2451,25 @@ ENDIF
 POP DX
 POP CX
 POP BX
+}
+;------------------------
+geometryknown (gkdrive)
+BYTE
+{
+; returns C if we know the spt of drive gkdrive (from the boot sector,
+; if it is a floppy), else NC
+AL = 1
+IF (gkdrive = 0)
+   AL = floppy0ok
+ENDIF
+IF (gkdrive = 1)
+   AL = floppy1ok
+ENDIF
+IF (AL = 0)
+   CLC
+ELSE
+   STC
+ENDIF
 }
 ;------------------------
 check_for_more ()
@@ -3742,7 +3780,7 @@ REPEAT
       ; for a floppy we must set the spt and bps on reading the 1st sector
       SI.DRVid = 01H
       SI.DRVtype = 2
-      SI.DRVspt = 9
+      SI.DRVspt = 8 ; every floppy format has at least 8
       SI.DRVheads = 2
       AX = max_bpsD
       SI.DRVbpsD.D = AX
