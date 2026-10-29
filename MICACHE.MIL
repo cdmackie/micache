@@ -679,6 +679,9 @@ DO
             debugline(&readnocache,0)
             POP AX
             #ENDIF ;======
+            ; a disk change seen while reading extra sectors into a CT
+            ; must not be lost by the retry below, as that would clear it
+            EXITL (errorcode = 6)
             read_into_cache() ; returns DX with offset of sector, AX with CT
             EXITL (errorcode <> 0) ; disk error
             IF (AX = 0FFFFH) ; all CTs are locked, read from disk
@@ -3331,6 +3334,7 @@ REPEAT
    XOR AX,BX
    TEST AX,0F000H
    POP AX
+   PUSH BX ; end of the last CT
    IF (NZ)
       ; crosses a 64K boundary, so start the CT on it
       AND AX,0F000H
@@ -3338,7 +3342,12 @@ REPEAT
    ENDIF
    AX = BX
    AX += ct_lengthinparasD
-   EXIT (AX > DX) ; no room
+   IF (AX > DX)
+      ; no room, so our memory ends with the last CT
+      POP BX
+      EXIT
+   ENDIF
+   ADD SP,2
    PUSH AX
    XOR AX,AX
    ES.DI.CTlruD.D = SI
@@ -3354,6 +3363,11 @@ REPEAT
    CX++
    EXIT (CX = number_ctsD)
 ENDREP
+IF (CX = 0)
+   ; not even one CT fitted
+   CLC
+   RETURN
+ENDIF
 ES.SI.CTmruD.D = 0FFFFH
 ct_mruD = SI
 number_ctsD = CX
