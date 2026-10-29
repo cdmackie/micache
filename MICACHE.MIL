@@ -2333,7 +2333,8 @@ DS = DX
 CLD
 REPZ CMPSB
 POP DS
-IF (CX = 0)
+; test Z, not CX = 0: CX also reaches 0 when only the last byte differs
+IF (Z)
    ; equal
    STC
 ELSE
