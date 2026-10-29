@@ -795,6 +795,10 @@ DO
    IF (hitindicator = 1)
       clearhit()
    ENDIF
+   IF (errorcode = 6)
+      ; the disk has changed, so what we hold for it is for another disk
+      flush_cache(int13_drive)
+   ENDIF
    restorestate()
    popall()
    ; switch back to our old stack
@@ -2121,6 +2125,12 @@ REPEAT
    CALL DWORD PTR normINT13
    POP DI
    EXIT (NC)
+   IF (AH = 6)
+      ; disk changed: dont retry (the reset would clear the change line),
+      ; but return it so we and DOS find out
+      STC
+      EXIT
+   ENDIF
    ;
    DI--
    IF (DI = 0)
@@ -2183,6 +2193,12 @@ REPEAT
    CALL DWORD PTR normINT13
    POP DI
    EXIT (NC)
+   IF (AH = 6)
+      ; disk changed: dont retry (the reset would clear the change line),
+      ; but return it so we and DOS find out
+      STC
+      EXIT
+   ENDIF
    ;
    DI--
    IF (DI = 0)
