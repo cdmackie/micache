@@ -5,7 +5,8 @@
 # base images, runs a scenario under MICACHE (with the FAULT13 fault
 # injector loaded below it, and the probe tools), powers off, and is then
 # checked on the host from the disk images. Runs are isolated in
-# work/r/Rnnn, so several run at once (-j, default 4).
+# work/r/Rnnn; -j N runs N at once (default 1, at most 2). Only one suite
+# runs at a time (work/suite.lock), and DOSBox-X runs at low priority.
 #
 # Every case runs with both builds. A case that targets a bug expects the
 # original to FAIL (showing the bug is real) and the fix to PASS; the others
@@ -282,9 +283,10 @@ run_one() { # CASE BUILD ID
 	pcspeaker=false
 	EOF
 	local go=("$DBX" -silent -nogui -nomenu -conf "$(cygpath -w "$r/boot.conf")" -c "mount y \"$TW\"" -c "y:")
-	timeout 60 "${go[@]}" -c "work\\r\\$id\\STAGE.BAT" >/dev/null 2>&1
+	# low priority, and killed outright if it outstays its timeout
+	timeout -k 10 60 nice -n 15 "${go[@]}" -c "work\\r\\$id\\STAGE.BAT" >/dev/null 2>&1
 	local t0=$SECONDS
-	timeout 240 "${go[@]}" -c "work\\r\\$id\\BOOT.BAT" >/dev/null 2>&1
+	timeout -k 10 240 nice -n 15 "${go[@]}" -c "work\\r\\$id\\BOOT.BAT" >/dev/null 2>&1
 	local rc=$? dt=$((SECONDS - t0))
 	"$SEVENZ" x -y -o"$d/c" "$r/RUN.IMG" > /dev/null 2>&1
 	[ $FLOP = 1 ] && "$SEVENZ" x -y -o"$d/a" "$r/FD.IMG" > /dev/null 2>&1
@@ -300,17 +302,52 @@ run_one() { # CASE BUILD ID
 }
 
 # ---- main ----------------------------------------------------------------
-J=4
+# A worker runs exactly one case and can never start a suite. This is
+# decided by the environment, before any option parsing: an earlier version
+# passed "--one" as an argument, getopts swallowed it, and every worker
+# started a whole suite of its own -- an exponential fork bomb that took the
+# machine down.
+if [ -n "$SUITE_WORKER" ]; then
+	[ $# = 3 ] || { echo "worker: bad arguments: $*" >&2; exit 1; }
+	run_one "$1" "$2" "$3"
+	exit
+fi
+
+MAXJ=2          # hard cap on concurrent DOSBox-X instances (each takes a core)
+J=1
 while getopts "j:lk" o; do
 	case $o in
 	j) J=$OPTARG ;;
 	l) echo $CASES_ALL | tr ' ' '\n'; exit 0 ;;
 	k) KEEP=1 ;;
+	*) exit 1 ;;
 	esac
 done
 shift $((OPTIND - 1))
-if [ "$1" = --one ]; then run_one "$2" "$3" "$4"; exit; fi
+case $J in ''|*[!0-9]*) echo "-j needs a number" >&2; exit 1 ;; esac
+[ "$J" -ge 1 ] || J=1
+[ "$J" -le $MAXJ ] || { echo "-j $J capped to $MAXJ"; J=$MAXJ; }
+for c in "$@"; do   # only known case names, never anything else
+	case " $(echo $CASES_ALL) " in *" $c "*) ;; *) echo "unknown case: $c" >&2; exit 1 ;; esac
+done
 [ -f "$FIX" ] || { echo "build first: ../build.sh"; exit 1; }
+
+# only one suite at a time, machine-wide for this test dir
+LOCK="$T/work/suite.lock"
+mkdir -p "$T/work"
+if ! mkdir "$LOCK" 2>/dev/null; then
+	echo "another suite is running (or crashed): remove $LOCK if not" >&2
+	exit 1
+fi
+# on exit or interrupt, stop our workers and their DOSBox-X instances
+cleanup() {
+	trap - EXIT INT TERM
+	pkill -P $$ 2>/dev/null
+	[ -n "$XPID" ] && pkill -P "$XPID" 2>/dev/null
+	rmdir "$LOCK" 2>/dev/null
+}
+trap cleanup EXIT INT TERM
+
 CASES=${*:-$CASES_ALL}
 setup
 mkdir -p work/r work/res
@@ -320,5 +357,8 @@ for c in $CASES; do
 	for b in orig fix; do
 		n=$((n + 1)); printf '%s %s R%03d\n' "$c" "$b" $n
 	done
-done | xargs -P "$J" -L 1 bash "$0" ${KEEP:+-k} --one
+done > work/JOBS.TXT
+SUITE_WORKER=1 xargs -P "$J" -L 1 bash "$T/suite.sh" < work/JOBS.TXT &
+XPID=$!
+wait $XPID
 echo "--- summary: $(grep -c ' BAD ' work/SUITE.TXT) BAD, $(grep -c NOREPRO work/SUITE.TXT) NOREPRO (whole file)"

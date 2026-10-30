@@ -39,7 +39,7 @@ run_dbx() {
 	local to=$1; shift
 	printf '%s\r\n' "$@" > "$T/work/RUN.BAT"
 	dbx_conf
-	(cd "$T" && timeout "$to" "$DBX" -silent -nogui -nomenu -conf "$T/work/boot.conf" \
+	(cd "$T" && timeout -k 10 "$to" nice -n 15 "$DBX" -silent -nogui -nomenu -conf "$T/work/boot.conf" \
 		-c "mount y \"$TW\"" -c "y:" -c "work\\RUN.BAT" >/dev/null 2>&1)
 	local rc=$?
 	[ $rc = 124 ] && echo "run_dbx: TIMEOUT after ${to}s" >&2
