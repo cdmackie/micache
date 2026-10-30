@@ -7,6 +7,8 @@
 ;   SEC13 X d c h s n v      the same, but with INT 13h AH=0FDh, which
 ;                            FAULT13 sends straight to the BIOS (so it
 ;                            changes the disk behind MICACHE's back)
+;   SEC13 F d c h s n        format the track with n 512-byte sectors
+;                            (s is ignored)
 ;
 ; Numbers are decimal (d: 0 = A:, 128 = C:). Prints one line to stdout:
 ; the command and "OK" or "ERR xx" (hex BIOS error), errorlevel 0 or 1.
@@ -39,6 +41,8 @@ bufok:  mov bufp,bx
         mov nsec,al
         cmp cmd,'R'
         je  doread
+        cmp cmd,'F'
+        je  dofmt
         call getnum
         mov patv,al
         call fill
@@ -49,7 +53,25 @@ bufok:  mov bufp,bx
 dowr:   call bios
         jmp report
 
-doread: call bios
+dofmt:  mov di,bufp             ; address fields: C H R N per sector
+        mov cl,1
+ff1:    mov al,byte ptr cyl
+        stosb
+        mov al,head
+        stosb
+        mov al,cl
+        stosb
+        mov al,2                ; N = 2: 512 bytes
+        stosb
+        inc cl
+        cmp cl,nsec
+        jbe ff1
+        mov ah,5
+        call bios
+        jmp report
+
+doread: mov ah,2
+        call bios
         jc  report
         push ax                 ; append to file
         call skipsp

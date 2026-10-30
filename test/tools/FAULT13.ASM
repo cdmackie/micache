@@ -5,10 +5,13 @@
 ; install; run again with a command to control the resident copy:
 ;
 ;   FAULT13            install
-;   FAULT13 E d n c r  on drive d, starting with the n-th read/write from
+;   FAULT13 E d n c r [y]
+;                      on drive d, starting with the n-th read/write from
 ;                      now, fail r calls in a row with code c. Each does the
 ;                      transfer and then, if a read, fills the whole buffer
-;                      with 0EEh (a failed transfer can leave any data)
+;                      with 0EEh (a failed transfer can leave any data).
+;                      With y, only transfers to cylinder y count or fail,
+;                      so DOS's own disk traffic cannot use up the errors
 ;   FAULT13 D d        on drive d, fail with 09h (DMA boundary) any transfer
 ;                      whose buffer crosses a 64K physical boundary, as a
 ;                      real floppy BIOS does (d = 255 turns it off)
@@ -21,6 +24,8 @@
 ; ES:BX -> the state block. INT 13h AH=0FDh is a write (as AH=3) that goes
 ; straight to the BIOS: as MICACHE passes unknown functions on, a test can
 ; use it to change the disk behind MICACHE's back.
+; Once installed it also turns every format track call (05h), which the
+; DOSBox-X BIOS ignores, into writes of 0F6h over sectors 1 to AL.
 
 code    segment
         assume cs:code,ds:code
@@ -40,6 +45,7 @@ nreads  dw 0
 nwrites dw 0
 ninj    dw 0
 ndma    dw 0
+errcyl  dw 0FFFFh       ; cylinder for injected errors (0FFFFh = any)
 
 ; ---- resident handler -----------------------------------------------------
 int13:  cmp ah,0FEh
@@ -58,7 +64,37 @@ notctl: cmp ah,0FDh             ; direct write
         mov ah,3
         jmp cs:old13
 
-notdir: ; pending disk change?
+notdir: ; format track: DOSBox-X's BIOS ignores it, which would hide any
+        ; stale cached data, so do what a real format does to the data:
+        ; write AL sectors (1 to AL) of the track full of 0F6h
+        cmp ah,5
+        jne notfmt
+        push ax
+        push bx
+        push cx
+        push es
+        push cs
+        pop es
+        mov bx,offset fmtbuf
+        mov ah,al               ; sectors left
+        and cl,0C0h             ; keep cylinder bits 8-9, sector from 1
+fmt1:   inc cl
+        push ax
+        mov ax,0301h
+        pushf
+        call cs:old13
+        pop ax
+        dec ah
+        jnz fmt1
+        pop es
+        pop cx
+        pop bx
+        pop ax
+        xor ah,ah
+        clc
+        retf 2
+
+notfmt: ; pending disk change?
         cmp dl,cs:chgdrv
         jne nochg
         cmp ah,2
@@ -123,7 +159,19 @@ counted:
 nodma:  ; injected error?
         cmp dl,cs:errdrv
         jne pass
-        cmp cs:errcnt,1
+        cmp cs:errcyl,0FFFFh
+        je  cylok
+        push ax                 ; cylinder = CH + (CL bits 6-7) * 256
+        mov al,cl
+        rol al,1
+        rol al,1
+        and al,3
+        mov ah,al
+        mov al,ch
+        cmp ax,cs:errcyl
+        pop ax
+        jne pass
+cylok:  cmp cs:errcnt,1
         jbe fail
         dec cs:errcnt
 pass:   jmp cs:old13
@@ -152,6 +200,8 @@ nofill: mov ah,cs:errcode
         xor al,al
         stc
         retf 2
+
+fmtbuf  db 512 dup (0F6h)
 
 resend  label byte
 
@@ -211,6 +261,14 @@ cmde:   call getnum
         jnz cmde1
         inc ax
 cmde1:  mov es:[di+errrep-state],ax
+        call skipsp             ; optional cylinder
+        mov bl,[si]
+        sub bl,'0'
+        mov ax,0FFFFh
+        cmp bl,9
+        ja  cmde2
+        call getnum
+cmde2:  mov es:[di+errcyl-state],ax
         pop ax
         mov es:[di+errdrv-state],al
         jmp short ok
@@ -275,7 +333,7 @@ pn2:    pop dx
         ret
 
 msginst  db 'FAULT13 installed',13,10,'$'
-msgusage db 'usage: FAULT13 [E d n c r | D d | C d | S]',13,10,'$'
+msgusage db 'usage: FAULT13 [E d n c r [y] | D d | C d | S]',13,10,'$'
 crlf     db 13,10,'$'
 
 code    ends
