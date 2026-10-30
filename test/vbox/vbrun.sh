@@ -10,6 +10,16 @@
 # COM1 is a TCP server on 127.0.0.1:$VBPORT (default 5701) while the VM runs,
 # which we serve, so a test can ask (COMWAIT.COM) for the floppy to be
 # changed: a real media change, which DOSBox-X cannot do.
+#
+# Setup, once: put this script in ~/micache-vbox/ and create the VM:
+#   VBoxManage createvm --name micache-test --ostype DOS --register \
+#     --basefolder ~/micache-vbox/vm
+#   VBoxManage modifyvm micache-test --memory 16 --vram 9 --cpus 1 --ioapic off \
+#     --acpi off --boot1 disk --boot2 floppy --boot3 none --boot4 none \
+#     --audio-enabled off --usb-ohci off --nic1 none --graphicscontroller vboxvga \
+#     --uart1 0x3F8 4 --uart-mode1 disconnected
+#   VBoxManage storagectl micache-test --name IDE --add ide --controller PIIX4
+#   VBoxManage storagectl micache-test --name Floppy --add floppy --controller I82078
 set -u
 VM=micache-test
 img=$(readlink -f "$1") c=$2 h=$3 s=$4 fl=${5:-} to=${6:-240}

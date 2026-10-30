@@ -19,11 +19,16 @@
 #   SWAP-CHG  CHG13 probes of the change line (CHG.TXT) before and after a
 #             swap: no pass/fail
 # Result line appended to work/VBOX.TXT; files in work/vbres/CASE-BUILD.
+#
+# VBHOST (env) is the VirtualBox host as user@host, with vbrun.sh in
+# ~/micache-vbox/ there and the micache-test VM set up; VBKEY (env) is the
+# ssh key to use, if not your default one.
 source "$(dirname "$0")/../lib.sh"
 cd "$T"
-HOST=user@vboxhost
-SSH=(ssh -i "$HOME/.ssh/id_rsa" -o BatchMode=yes $HOST)
-SCP=(scp -q -i "$HOME/.ssh/id_rsa" -o BatchMode=yes)
+HOST=${VBHOST:?set VBHOST=user@host (the VirtualBox host)}
+KEY=(); [ -n "${VBKEY:-}" ] && KEY=(-i "$VBKEY")
+SSH=(ssh "${KEY[@]}" -o BatchMode=yes $HOST)
+SCP=(scp -q "${KEY[@]}" -o BatchMode=yes)
 c=$1 b=$2
 case $c in SWAP-RAW|SWAP-DOS|SWAP-DIAG|SWAP-CHG) ;; *) echo "unknown case: $c" >&2; exit 1 ;; esac
 case $b in
