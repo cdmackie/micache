@@ -597,8 +597,6 @@ DO
    AX = CS
    SS = AX
    AX = axtempD
-   ; our string moves all go forwards, whatever our caller had
-   CLD
    ;
    ; read/write operation
    int13_operation = AH
