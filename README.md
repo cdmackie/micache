@@ -1,12 +1,11 @@
 # MI-CACHE
 
-A disk cache for MS-DOS, written by Colin Mackie in 1992 as **MI Systems MI-CACHE
-Version 1.0**. It is a TSR that hooks INT 13h and caches whole disk tracks for one
+A disk cache for MS-DOS, written in 1992 as **MI Systems MI-CACHE Version 1.0**. It is a TSR that hooks INT 13h and caches whole disk tracks for one
 drive, keeping the cache in extended memory (XMS), expanded memory (EMS) or
 conventional memory. Writes go straight through to the disk.
 
-It is written in [**MIL**](https://github.com/cdmackie/mil), Colin's own pre-processor
-language for 8086 assembly (1991–93), which compiles to MASM source.
+It is written in [**MIL**](https://github.com/cdmackie/mil), a pre-processor language
+for 8086 assembly from the same years, which compiles to MASM source.
 
 ## What is in this repository
 
