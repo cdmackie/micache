@@ -685,6 +685,10 @@ DO
             IF (AX = 0FFFFH) ; all CTs are locked, read from disk
                JMP exit13normal
             ENDIF
+         ELSE
+            ; a hit: the disk may have been changed since we cached it
+            check_change()
+            EXITL (errorcode <> 0)
          ENDIF
          ; sector is in cache: AX (CT), DX (sector offset in cache)
          #IF DEBUG ;===
@@ -725,6 +729,10 @@ DO
             debugline(&incache,0)
             POP AX
             #ENDIF ;======
+            ; the disk may have been changed since we cached it, and a
+            ; matching compare below would then skip the write
+            check_change()
+            EXITL (errorcode <> 0)
             PUSH AX ; save CT
             compare_cache(AX) ; compares memory with cache
             POP AX
@@ -2761,6 +2769,38 @@ ES = AX
 AX = oldhitD
 ES.158.D = AX
 POP ES
+POP AX
+}
+;------------------------
+check_change()
+{
+; a cache hit on a floppy makes no BIOS call, so it would never see the
+; disk being changed: ask, and if it has been, set errorcode to 6 so the
+; caller gets the 06H a BIOS read would have given. Only for drives that
+; report a change line: without one, the BIOS says "changed" every time.
+PUSH AX
+PUSH DX
+DL = int13_drive
+DO
+   EXIT (DL >= 80H)
+   AH = 15H
+   CLI
+   PUSHF
+   CALL DWORD PTR normINT13
+   STI
+   EXIT (C)
+   EXIT (AH <> 2) ; no change line
+   DL = int13_drive
+   AH = 16H
+   CLI
+   PUSHF
+   CALL DWORD PTR normINT13
+   STI
+   IF (AH = 6)
+      errorcode = 6
+   ENDIF
+END
+POP DX
 POP AX
 }
 ;------------------------
