@@ -5,8 +5,8 @@ Version 1.0**. It is a TSR that hooks INT 13h and caches whole disk tracks for o
 drive, keeping the cache in extended memory (XMS), expanded memory (EMS) or
 conventional memory. Writes go straight through to the disk.
 
-It is written in **MIL**, Colin's own 1993 pre-processor language for 8086 assembly,
-which compiles to MASM source.
+It is written in [**MIL**](https://github.com/cdmackie/mil), Colin's own pre-processor
+language for 8086 assembly (1991–93), which compiles to MASM source.
 
 ## What is in this repository
 
@@ -89,8 +89,9 @@ cache.
 `build.sh` runs MIL 1.25, MASM 5.10, LINK and MAPSYM inside
 [DOSBox-X](https://dosbox-x.com/), from Git Bash on Windows. It expects `MIL.EXE`,
 `MASM5.EXE`, `LINK.EXE` and `MAPSYM.EXE` in the directory above this one, a DOSBox-X
-config at `../_build/dbx.conf`, and DOSBox-X in `C:\DOSBox-X`. None of these tools are
-included here. The result is `out/MICACHE.EXE`.
+config at `../_build/dbx.conf`, and DOSBox-X in `C:\DOSBox-X`. `MIL.EXE` comes from
+the [MIL repository](https://github.com/cdmackie/mil); the Microsoft tools are not
+included anywhere. The result is `out/MICACHE.EXE`.
 
 ## Testing
 
