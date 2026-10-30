@@ -38,8 +38,10 @@ for 8086 assembly from the same years, which compiles to MASM source.
 | Close two gaps found in review of the earlier fixes | a disk change was missed on one path; up to 64K too much memory stayed resident |
 | Check for a floppy disk change before serving a cache hit | raw reads after a floppy swap got the old disk's data |
 
-Two other commits leave the code unchanged: one strips TopCopy end-of-file bytes from
-the source, and `build.sh` confirms that the untouched source rebuilds the 1992
+Some commits leave the code unchanged. Two strip the end-of-file bytes (a Ctrl-Z and
+saved settings) that the TopCopy word processor left on the source and batch files, so
+GitHub shows them as text; the first commit keeps them as found, and `MICACHE.TCD`, a
+TopCopy document, keeps its own. And `build.sh` confirms that the untouched source rebuilds the 1992
 `MICACHE.EXE` byte for byte. A fix that cleared the direction flag on entry was later
 reverted as unnecessary, because MIL emits a `CLD` before every string move.
 
